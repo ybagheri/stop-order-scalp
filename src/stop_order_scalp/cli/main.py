@@ -225,7 +225,7 @@ def _cmd_status(args: argparse.Namespace, config: AppConfig, out: TextIO, err: T
 
 
 def _cmd_test_connection(args: argparse.Namespace, config: AppConfig, out: TextIO, err: TextIO) -> int:
-    probe_connection = _resolve("stop_order_scalp.execution.mt5_broker", "probe_connection")
+    probe_connection = _resolve("stop_order_scalp.market_data.mt5_feed", "probe_connection")
 
     report = probe_connection(config)
     _emit(out, report)

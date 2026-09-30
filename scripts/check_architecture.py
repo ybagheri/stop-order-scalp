@@ -7,9 +7,9 @@ whoever reviews the diff six months later.
 
 Checks, in order:
 
-1. ``MetaTrader5`` may be imported only by ``market_data/mt5_feed.py`` and
-   ``execution/mt5_broker.py``, and only inside a function body (lazy import), never at
-   module scope.
+1. ``MetaTrader5`` may be imported only by ``market_data/mt5_module.py`` (which owns the
+   import), ``market_data/mt5_feed.py`` and ``execution/mt5_broker.py``, and only inside a
+   function body (lazy import), never at module scope.
 2. ``albrooks`` may be imported only by ``integrations/al_brooks_adapter.py``.
 3. Layer direction: ``domain`` imports nothing from the project but itself; ``strategy``,
    ``risk``, ``trailing`` and ``lifecycle`` may not import ``execution``,
@@ -63,8 +63,13 @@ BROKER_FREE_LAYERS: frozenset[str] = frozenset({"domain", "strategy", "risk", "t
 #: The only modules permitted to name ``MetaTrader5``. Fully qualified, because that is
 #: what :func:`module_name` returns; an unqualified spelling here silently never matches,
 #: which would make the rule reject the two permitted modules as well.
+#:
+#: ``mt5_module`` is the one that owns the import statement. ``mt5_feed`` and
+#: ``mt5_broker`` reach the terminal through it, so a reviewer can read one file to see
+#: every way this project touches a broker.
 MT5_ALLOWED: frozenset[str] = frozenset(
     {
+        "stop_order_scalp.market_data.mt5_module",
         "stop_order_scalp.market_data.mt5_feed",
         "stop_order_scalp.execution.mt5_broker",
     }

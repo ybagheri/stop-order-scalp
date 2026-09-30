@@ -165,3 +165,83 @@ found.
   real values.
 - Of the seven CLI commands, only `validate-config` is implemented. The other six exit **4**
   by design until their phase lands.
+
+---
+
+### Phase 2 — Market Data
+
+#### Added
+
+- `market_data/candles.py` — `freeze_closed_bars` keeps only the bars that had fully formed
+  at an explicitly supplied reference moment, and returns a `FreezeReport` recording exactly
+  what was withheld: how many forming bars were dropped, which one was in progress, whether
+  the input arrived out of order, and the boundaries of what survived. Also `select_closed`
+  and `require_closed_only`, a guard that turns a silent look-ahead bug into a loud failure
+  at the point of misuse.
+- `market_data/mt5_module.py` — the single `import MetaTrader5` in the project, a `Protocol`
+  describing exactly the terminal functions used, and pure converters from terminal rows to
+  domain objects. The converters are duck-typed over namedtuple, dataclass, mapping and
+  object, so the test suite needs no numpy and no terminal.
+- `market_data/mt5_feed.py` — `MT5Feed` (connection, exact-case-insensitive symbol
+  resolution, cached `SymbolSpecification`, closed-only candles, forming candle by name,
+  ticks, account snapshot), `ServerClock`, and `probe_connection`.
+- `docs/mt5/SETUP.md` — installing the broker-supplied package, configuring `.env`, the
+  clock question, and a troubleshooting table.
+- `docs/mt5/SYMBOL_SPECIFICATIONS.md` — the assumed `US30` figures worked through by hand,
+  and the checklist Phase 11 uses to replace them with measured values.
+- 115 tests: `tests/unit/test_candles.py` (43) and `tests/unit/test_mt5.py` (72), against a
+  hand-written fake that models the terminal's documented awkwardness.
+
+#### Changed
+
+- `scripts/check_architecture.py` — `MT5_ALLOWED` now names three modules, because
+  `mt5_module.py` owns the import statement. A new test asserts that only that one of them
+  actually contains `import MetaTrader5`.
+- `cli/main.py` — `test-connection` now resolves `market_data.mt5_feed.probe_connection`
+  rather than `execution.mt5_broker.probe_connection`. A read-only reachability check is a
+  market-data concern, and this makes the command work in Phase 2 rather than Phase 5.
+
+#### Fixed
+
+- Nothing was broken; the phase added code. The two gate tests that failed on the
+  `MT5_ALLOWED` and `test-connection` changes were updated deliberately, and each
+  replacement asserts the new behaviour rather than merely accommodating it.
+
+#### Decisions
+
+- **Broker server time decides candle closure**, from the terminal's `time_current()`.
+  MetaTrader 5 anchors bars and sessions to server time, which for most brokers is not UTC;
+  judging closure against the local clock would be up to three hours wrong and would look
+  like a working strategy. `ServerClock` implements the same `Clock` protocol as the system
+  clock, so it is injected identically, and it reports `degraded` when it falls back rather
+  than substituting silently.
+- **The feed requests one bar more than it needs** and lets the freeze drop the forming one.
+  Trusting the terminal to exclude it would make the freeze depend on behaviour this project
+  does not control.
+- **A missing broker field is refused, not defaulted.** An absent `trade_tick_value` or
+  `trade_contract_size` makes the instrument unusable, and a guessed value would mis-size
+  every position.
+- **A missing `trade_mode` defaults to demo.** Fail closed.
+- **The rates table is described structurally, not as a numpy array**, so numpy stays an
+  optional `backtest` extra and the core remains importable with stdlib plus a YAML parser.
+- **The forming candle is reachable only by calling `forming_candle()`**, and a test asserts
+  that `MT5Feed` has no order methods at all, so a strategy cannot bypass the execution gate
+  through the market-data layer.
+
+#### Known limits, documented rather than hidden
+
+- `floor_time` floors in UTC; MetaTrader 5 floors in server time. They agree for M1 and M15
+  — the only timeframes this strategy uses — for every common broker offset, but **not** for
+  `D1` at a non-whole-hour offset such as UTC+5:30. Both halves are stated in
+  `tests/unit/test_candles.py::TestTimezoneHandling`.
+- Every risk figure still rests on the synthetic specification. The real `US30` numbers are
+  captured in Phase 11.
+- Nothing has been executed against a real terminal. The fake models documented behaviour; a
+  fake cannot prove the terminal behaves as documented.
+
+#### Notes
+
+- **No profitability is claimed.** No backtest has been run against real data.
+- The `albrooks` cross-check of `freeze_closed_bars` is present and **skips cleanly**,
+  because the extra is not installed. It is the only skip in the suite, and it is acceptable
+  only because `albrooks` is genuinely optional.

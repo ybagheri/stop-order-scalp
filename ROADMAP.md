@@ -97,28 +97,79 @@ regression tests:
 
 ---
 
-## Phase 2 — Market Data — `pending`
+## Phase 2 — Market Data — `complete`
 
 Start here: `market_data/timeframes.py` and the point/price helpers in
-`domain/value_objects/price.py` are already implemented in Phase 1, and `Candle` already
-lives in `domain/models.py` with `is_closed_at()` and `close_time_is_floor()`. Phase 2
-builds the MT5 feed on top of them rather than re-implementing them.
+`domain/value_objects/price.py` were already implemented in Phase 1, and `Candle` already
+lived in `domain/models.py` with `is_closed_at()` and `close_time_is_floor()`. Phase 2
+built the MT5 side on top of them rather than re-implementing them.
 
 Implement:
 
 * `market_data/timeframes.py`: `M1`…`MN1` with period seconds and boundary math
   — **done in Phase 1**
 * `market_data/mt5_module.py`: lazy `import MetaTrader5`, typed protocol for the slice used
+  — **done**; it owns the import statement
 * `market_data/mt5_feed.py`: connect, symbol select, ticks, candles, closed-candle freeze
+  — **done**
 * `domain/value_objects/price.py`: `points_to_price`, `price_to_points`, `normalize_price`,
   `normalize_volume` — all broker-spec driven — **done in Phase 1**
 * `market_data/candles.py`: `Candle` domain object, `closed_only()` filter with an
-  explicit freeze report, tz-aware timestamps — `Candle` is in `domain/models.py`; the
-  `closed_only()` freeze filter is not
-* Broker server-time vs UTC vs local-time handling, documented
-* `docs/mt5/SETUP.md`, `docs/mt5/SYMBOL_SPECIFICATIONS.md`
+  explicit freeze report, tz-aware timestamps — **done**; `Candle` was in
+  `domain/models.py`, the freeze lives here
+* Broker server-time vs UTC vs local-time handling, documented — **done**;
+  `docs/mt5/SETUP.md` §4
+* `docs/mt5/SETUP.md`, `docs/mt5/SYMBOL_SPECIFICATIONS.md` — **done**
 
-Gate: tests pass (incl. timezone and boundary tests), lint/type clean, commit, push.
+Delivered:
+
+* `market_data/candles.py` — `freeze_closed_bars` with a `FreezeReport` recording exactly
+  what was withheld, `select_closed`, and `require_closed_only` as a guard. Pure: no I/O, no
+  clock. The reference moment is an argument, so the same input always gives the same
+  output.
+* `market_data/mt5_module.py` — the one `import MetaTrader5` in the project, a `Protocol`
+  for the API slice used, and pure converters from terminal rows to domain objects. numpy is
+  **not** imported: the rates table is described structurally, so the project stays stdlib
+  plus a YAML parser.
+* `market_data/mt5_feed.py` — `MT5Feed` (read-only; no order methods), `ServerClock`, and
+  `probe_connection`.
+* `docs/mt5/SETUP.md` and `docs/mt5/SYMBOL_SPECIFICATIONS.md`.
+
+Quality gate: **met** — 406 tests pass (1 skipped: the optional `albrooks` cross-check),
+`ruff` clean, `mypy --strict` clean over `src` and `tests`, architecture reports 29 modules
+and no violations.
+
+### Decisions made in Phase 2
+
+1. **`mt5_module.py` owns the import; `mt5_feed.py` reaches the terminal through it.** The
+   architecture allowlist now names three modules, but only one of them contains an
+   `import MetaTrader5` statement. A test asserts that, so a second import cannot creep in.
+2. **`probe_connection` lives in `market_data`, not `execution`.** A read-only reachability
+   check is a market-data concern. The CLI was re-pointed accordingly, which makes
+   `test-connection` work as of Phase 2 instead of Phase 5.
+3. **The feed requests `count + 1` bars and lets the freeze drop the forming one**, rather
+   than requesting `count` and trusting the terminal to exclude it.
+4. **A missing broker field is refused, not defaulted.** `trade_tick_value` absent means the
+   instrument is rejected by name, because a guessed tick value mis-sizes every position.
+5. **A missing `trade_mode` defaults to "demo".** Fail closed: a misdetected live account
+   must not be assumed live.
+6. **Symbol matching is exact and case-insensitive, never fuzzy**, so `US30` cannot select
+   `US30mini`.
+
+### The clock question, settled
+
+Broker **server** time decides candle closure, via the terminal's `time_current()`. Bar and
+tick timestamps arrive as absolute epoch seconds and are converted in UTC. `ServerClock`
+implements the same `Clock` protocol as the system clock, so it is injected identically and
+there is no second code path. When it falls back to the injected clock it sets `degraded`,
+because an invisible substitution of the wrong clock is the failure this design exists to
+prevent.
+
+One limit is documented and tested rather than left implicit: `floor_time` floors in UTC,
+MetaTrader 5 floors in server time, and these agree for M1 and M15 — the only timeframes
+the strategy uses — for every common broker offset, but **not** for `D1` at a non-whole-hour
+offset such as UTC+5:30. `tests/unit/test_candles.py::TestTimezoneHandling` states both
+halves.
 
 ---
 

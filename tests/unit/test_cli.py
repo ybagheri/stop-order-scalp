@@ -27,10 +27,14 @@ from stop_order_scalp.cli.main import (
 from stop_order_scalp.domain.exceptions import ComponentNotAvailableError
 
 #: Commands whose implementation belongs to a later phase.
+#:
+#: ``test-connection`` is deliberately absent: Phase 2 moved its probe into
+#: ``market_data.mt5_feed``, where it belongs, because a read-only reachability check is a
+#: market-data concern rather than an execution one. It now runs and reports a structured
+#: result, exiting 3 when the terminal is unreachable.
 DEFERRED_COMMANDS: tuple[tuple[str, ...], ...] = (
     ("run", "--dry-run"),
     ("status",),
-    ("test-connection",),
     ("journal",),
     ("diagnostics",),
     ("backtest",),
@@ -160,6 +164,34 @@ class TestResolve:
 # =============================================================================
 # Error reporting
 # =============================================================================
+
+
+class TestTestConnection:
+    """The one MT5-touching command, which must never raise and never write."""
+
+    def test_it_reports_rather_than_raising_when_the_terminal_is_absent(
+        self, hermetic_env_file: Path
+    ) -> None:
+        code, out, err = _run(["test-connection", "--env-file", str(hermetic_env_file)])
+        report = json.loads(out)
+        assert report["connected"] is False
+        assert report["error"] is not None
+        assert err == ""
+        assert code == EXIT_NOT_CONNECTED
+
+    def test_the_report_names_whether_the_package_is_installed(
+        self, hermetic_env_file: Path
+    ) -> None:
+        _, out, _ = _run(["test-connection", "--env-file", str(hermetic_env_file)])
+        report = json.loads(out)
+        assert "package_installed" in report
+        assert "terminal_path_configured" in report
+        assert "credentials_configured" in report
+
+    def test_it_never_prints_a_traceback(self, hermetic_env_file: Path) -> None:
+        _, out, err = _run(["test-connection", "--env-file", str(hermetic_env_file)])
+        assert "Traceback" not in out
+        assert "Traceback" not in err
 
 
 class TestErrorReporting:

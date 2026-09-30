@@ -7,12 +7,12 @@
 > **Status: under active development.** See [`ROADMAP.md`](ROADMAP.md) for what exists
 > today and [`HANDOFF.md`](HANDOFF.md) for the state of the last completed phase.
 >
-> **Phase 1 (project foundation) is complete.** The domain layer, configuration, logging,
-> clock, timeframes and the architecture gate are implemented and tested — 274 tests, no
-> broker required. Of the seven CLI commands below, **only `validate-config` works**; the
-> other six exit with code **4** and say which phase has not landed yet. The command
-> surface is fixed ahead of its implementations on purpose, so the contract is testable
-> now.
+> **Phases 1–2 complete** (project foundation, market data). The domain layer,
+> configuration, logging, clock, timeframes, the closed-candle freeze and the MetaTrader 5
+> feed are implemented and tested — **406 tests, no broker required**. Of the seven CLI
+> commands below, `validate-config` and `test-connection` work; the rest exit **4** and say
+> which phase has not landed. The command surface is fixed ahead of its implementations on
+> purpose, so the contract is testable now.
 >
 > **No profitability is claimed.** See [`docs/strategy/BASELINE.md`](docs/strategy/BASELINE.md).
 >
@@ -100,7 +100,7 @@ Part of the contract, because a supervisor process depends on them.
 ## Development
 
 ```bash
-python -m pytest                             # 274 tests
+python -m pytest                             # 406 tests
 python -m ruff check .                       # lint
 python -m mypy                               # types, strict, src + tests
 python scripts/check_architecture.py         # architecture boundaries
@@ -179,6 +179,19 @@ CLI  →  Application (TradingService)  →  Orchestrator
   `scripts/check_architecture.py` enforces this in CI.
 * `simulated_broker` is a first-class implementation, not a test double — it is what
   `DRY_RUN` and the backtester run on.
+
+### The two rules that matter most
+
+**A candle must be closed before it can be read.** `market_data/candles.py` is the only
+route candles take to a decision. It drops every bar that had not finished at an explicitly
+supplied reference moment, and returns a report naming what it withheld. A `hypothesis`
+property proves that appending future bars cannot change a decision taken at time *t*.
+`test-connection` aside, nothing can reach a forming bar except by asking for it by name.
+
+**Broker server time decides when a candle is closed.** MetaTrader 5 anchors bars and
+sessions to server time, which is usually not UTC, so the local clock would be hours wrong —
+and would look like a working strategy. `ServerClock` reads the terminal's own clock and
+reports when it has had to fall back. See [`docs/mt5/SETUP.md`](docs/mt5/SETUP.md) §4.
 
 See [`docs/architecture/ARCHITECTURE.md`](docs/architecture/ARCHITECTURE.md).
 

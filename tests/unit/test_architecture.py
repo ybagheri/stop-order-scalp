@@ -104,15 +104,32 @@ class TestMetaTrader5Boundary:
         )
         assert arch.check(path, tmp_path) == []
 
-    def test_only_the_two_named_modules_are_permitted(self) -> None:
+    def test_only_the_named_modules_are_permitted(self) -> None:
         # Regression: the allowlist must be spelled the way module_name() returns it, or
-        # the rule rejects the two permitted modules as well and permits nothing.
+        # the rule rejects the permitted modules as well and permits nothing.
+        # mt5_module is the one that owns the `import MetaTrader5` statement; the other
+        # two reach the terminal through it.
         assert frozenset(
             {
+                "stop_order_scalp.market_data.mt5_module",
                 "stop_order_scalp.market_data.mt5_feed",
                 "stop_order_scalp.execution.mt5_broker",
             }
         ) == arch.MT5_ALLOWED
+
+    def test_the_import_statement_lives_in_exactly_one_market_data_module(self) -> None:
+        # Two market_data files naming the terminal directly is one too many for a
+        # reviewer to hold in their head, which is the point of routing everything through
+        # MT5Module.
+        for name in sorted(arch.MT5_ALLOWED):
+            if not name.startswith("stop_order_scalp.market_data."):
+                continue
+            relative = Path(*name.split(".")).with_suffix(".py")
+            source = (arch.SRC / relative).read_text(encoding="utf-8")
+            if name.endswith("mt5_module"):
+                assert "import MetaTrader5" in source, name
+            else:
+                assert "import MetaTrader5" not in source, name
 
 
 # =============================================================================

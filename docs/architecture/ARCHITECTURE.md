@@ -48,12 +48,16 @@ from the outside arrives as an argument.
 | `domain/exceptions.py` | 1 | Complete — 22 types rooted at `StopOrderScalpError` |
 | `domain/value_objects/price.py` | 1 | Complete — `Price`, `Money`, `Volume`, `SymbolSpecification` |
 | `domain/models.py` | 1 | Complete — `Candle`, `Tick`, `TradePlan`, `OrderIntent`, `RiskAssessment`, … |
-| `domain/interfaces.py` | 1 | Complete — `Broker`, `MarketDataProvider`, `Clock`, `AuditSink` || `infrastructure/config.py` | 1 | Complete — three-layer config, validated |
+| `domain/interfaces.py` | 1 | Complete — `Broker`, `MarketDataProvider`, `Clock`, `AuditSink` |
+| `infrastructure/config.py` | 1 | Complete — three-layer config, validated |
 | `infrastructure/logging.py` | 1 | Complete — JSONL audit log, rotating |
 | `infrastructure/clock.py` | 1 | Complete — injectable, tz-aware only |
-| `market_data/timeframes.py` | 1/2 | Period seconds and boundary math |
-| `cli/main.py` | 1 | Contract complete; only `validate-config` is implemented |
-| `strategy/`, `risk/`, `trailing/`, `execution/`, `lifecycle/`, `application/`, `backtest/`, `research/`, `integrations/` | 2–12 | Empty packages, present so the boundary is real from day one |
+| `market_data/timeframes.py` | 1 | Period seconds and boundary math |
+| `market_data/candles.py` | 2 | Complete — the closed-candle freeze and its report |
+| `market_data/mt5_module.py` | 2 | Complete — the one `import MetaTrader5`, the API protocol, pure converters |
+| `market_data/mt5_feed.py` | 2 | Complete — `MT5Feed`, `ServerClock`, `probe_connection` |
+| `cli/main.py` | 1/2 | Contract complete; `validate-config` and `test-connection` implemented |
+| `strategy/`, `risk/`, `trailing/`, `execution/`, `lifecycle/`, `application/`, `backtest/`, `research/`, `integrations/` | 3–12 | Empty packages, present so the boundary is real from day one |
 
 ## 4. The protocols
 
@@ -62,7 +66,7 @@ system testable without a broker.
 
 | Protocol | Replaced in production by | Replaced in tests by |
 | --- | --- | --- |
-| `Clock` | `infrastructure.clock.SystemClock` | `FixedClock` |
+| `Clock` | `infrastructure.clock.SystemClock`, `market_data.mt5_feed.ServerClock` | `FixedClock` |
 | `AuditSink` | `infrastructure.logging.AuditLogger` | `MemoryAuditSink` |
 | `MarketDataProvider` | `market_data.mt5_feed.MT5Feed` | hand-written fake |
 | `Broker` | `execution.mt5_broker.MetaTrader5Broker` | `execution.simulated_broker.SimulatedBroker` |
@@ -131,7 +135,7 @@ source, because a gate that cannot fail is worse than no gate.
 
 | # | Rule |
 | --- | --- |
-| 1 | `MetaTrader5` only in `market_data/mt5_feed.py` and `execution/mt5_broker.py`, and only inside a function body |
+| 1 | `MetaTrader5` only in `market_data/mt5_module.py` (which owns the import), `market_data/mt5_feed.py` and `execution/mt5_broker.py`, and only inside a function body |
 | 2 | `albrooks` only in `integrations/al_brooks_adapter.py` |
 | 3 | Layer direction; `domain` imports nothing but itself |
 | 4 | No `float` annotation on a money-shaped name; no `float()` cast of one |
@@ -145,6 +149,41 @@ Run it with `python scripts/check_architecture.py`; it is also part of `pytest`.
 > `float`-money pattern required a leading colon that `ast.unparse` never emits, and three
 > `ast.unparse` calls crashed the script outright. The negative tests in
 > `tests/unit/test_architecture.py` exist so this cannot recur silently.
+
+> **Note.** Rule 1 now names three modules, but only `mt5_module.py` contains an
+> `import MetaTrader5` statement; the other two reach the terminal through it. A test
+> asserts that, so the count cannot grow quietly.
+
+## 9a. Which clock decides what
+
+The single most consequential thing in the market-data layer, and the reason
+`ServerClock` is a separate class rather than a line inside the feed.
+
+MetaTrader 5 anchors bars, sessions and trading hours to **broker server time**, which for
+most brokers is UTC+2 or UTC+3. A bar stamped `12:00` server time closes at `12:00` server
+time; on a machine running UTC, local time does not reach that instant for two or three
+more hours. Judging closure against the local clock would therefore be *late* by hours —
+and on an hourly or daily timeframe, wrong for hours at a stretch, while looking like a
+working strategy.
+
+So:
+
+| Question | Clock |
+| --- | --- |
+| Has this bar closed? | **broker server time**, from `time_current()` |
+| When did this bar/tick happen? | UTC, from the terminal's absolute epoch seconds |
+| Scheduling, deadlines, log stamps | local / UTC, via `SystemClock` |
+
+`ServerClock` implements the same `Clock` protocol as the system clock, so it is injected
+identically and there is no second code path to remember. Nothing in `market_data/` reads a
+clock directly — rule 6 would fail the build. When `ServerClock` falls back to the injected
+clock because the terminal is unreachable, it sets `degraded`, because an invisible
+substitution of the wrong clock is the exact failure this design exists to prevent.
+
+One limit is documented and tested rather than left implicit: `floor_time` floors in UTC,
+MetaTrader 5 floors in server time, and the two agree for M1 and M15 — the only timeframes
+this strategy uses — for every common broker offset, but not for `D1` at a non-whole-hour
+offset such as UTC+5:30. See `docs/mt5/SETUP.md` §4.
 
 ## 10. Exit codes
 
