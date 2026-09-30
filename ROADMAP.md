@@ -173,19 +173,92 @@ halves.
 
 ---
 
-## Phase 3 — Core Strategy — `pending`
+## Phase 3 — Core Strategy — `complete`
 
 Implement:
 
 * `strategy/candle_direction.py`: M15 candle direction with an explicit, configurable
-  selection rule and no look-ahead
+  selection rule and no look-ahead — **done**
 * `strategy/entry_rules.py`: BUY STOP = `M1.high + offset`, SELL STOP = `M1.low − offset`
+  — **done**
 * `strategy/signal.py` + `strategy/strategy.py`: produce a `TradeSignal` or `NoTrade`
-* US30-only restriction enforced by `AllowedInstruments` policy
+  — **done**
+* US30-only restriction enforced by `AllowedInstruments` policy — **done**; uses the
+  existing `InstrumentPolicy`
 * Look-ahead bias tests, including the property that adding future candles cannot change a
-  decision taken at time *t*
+  decision taken at time *t* — **done**
 
-Gate: strategy tests + property tests, commit, push.
+Delivered:
+
+* `strategy/candle_direction.py` — five verdicts, of which two authorise a trade. A doji has
+  no direction and is not traded; a missing candle is not a neutral candle, and
+  `is_indeterminate` separates "could not tell" from "told, and the answer is no".
+* `strategy/entry_rules.py` — the two exact rules, with every point conversion through
+  `SymbolSpecification`. No function multiplies a point count by a price.
+* `strategy/signal.py` — `Decision = TradeDecision | NoTrade`. "Not trading" is a
+  first-class value with a named reason and its evidence attached, never an exception and
+  never a null signal.
+* `strategy/strategy.py` — the `StopOrderStrategy` façade. Stateless, so "what did the
+  strategy believe at time *t*?" stays answerable.
+* `docs/strategy/ENTRY_RULES.md` and `docs/strategy/README.md`.
+* 119 tests in `tests/strategy/`.
+
+Quality gate: **met** — 533 tests pass (1 skipped: the optional `albrooks` cross-check),
+`ruff` clean, `mypy --strict` clean over `src` and `tests`, architecture reports 33 modules
+and no violations.
+
+### The headline property
+
+> **appending future candles cannot change a decision taken at time *t***
+
+Stated as a `hypothesis` property over generated market data rather than as one worked
+example, because an example only proves the function behaved on the case somebody thought
+of. The generators vary the bar count, the reference moment's position within the series,
+the M15 bodies (bull/bear/doji) and the input order, because the interesting cases are the
+ones where the reference falls inside a forming bar.
+
+Three more fall out of it: the same inputs always give the same decision; input order never
+changes the decision; and a decision never uses a bar that had not closed at the reference.
+
+### A bug found while writing this phase
+
+The first implementation of `entry_rules.py` reused
+`SymbolSpecification.round_stop_price` for entry prices. It is the wrong method, and
+inverted the rounding.
+
+| Method | Anchored on | BUY rounds | SELL rounds |
+| --- | --- | --- | --- |
+| `round_stop_price` | the **entry** (a stop loss sits below a BUY entry) | down | up |
+| `round_entry_price` | the **candle's extreme** (a BUY STOP sits above the high) | up | down |
+
+Using the first for an entry moved every order a tick *toward* the market: the stop would
+trigger before the level the strategy specified, which is a different trade, and it also
+moves closer to market where a broker's `stops_level` rejection lives.
+
+`SymbolSpecification.round_entry_price` was added, `entry_rules.py` uses only that, and a
+test asserts the two disagree. Rounding is only non-trivial when a price arrives off the
+tick grid, so this is a correctness guarantee rather than a workaround.
+
+### Decisions made in Phase 3
+
+1. **A doji is never traded, and never falls back to an earlier candle.** "Use the last
+   candle that had a direction" silently changes the rule from *most recent* to *most recent
+   directional*, which is a different strategy. Excluded by a test.
+2. **A missing candle is not a neutral candle.** Separate verdicts, and `is_indeterminate`
+   so an operator can tell a quiet market from a broken feed.
+3. **An instrument-policy refusal raises rather than returning `NoTrade`.** Reaching that
+   check means the configuration or feed is wrong, and a run that silently declines to
+   trade all day is the worst possible outcome — it looks like a strategy that just is not
+   triggering.
+4. **The strategy carries no stop loss or take profit.** Those come from configuration in
+   the risk engine, so it stays possible to tell which signals carried geometry.
+5. **The check order is direction, then entry, then timeframe.** When both the direction and
+   the entry are unusable, the reason names the direction, because that is what has to be
+   fixed first. Pinned by a test.
+6. **`StopOrderStrategy` accepts a specification whose name is any configured alias**, not
+   only the logical symbol. A broker naming the permitted instrument `US30.cash` is the
+   common case, and requiring an exact match would make the strategy impossible to
+   construct on most brokers.
 
 ---
 

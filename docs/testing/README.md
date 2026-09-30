@@ -10,7 +10,7 @@ This page is the short version, and it is accurate today.
 ```bash
 python -m pip install -e ".[dev]"
 
-python -m pytest                             # 406 tests, 1 skipped
+python -m pytest                             # 533 tests, 1 skipped
 python -m ruff check .                       # lint
 python -m mypy                               # types, strict, src + tests
 python scripts/check_architecture.py         # architecture boundaries
@@ -24,15 +24,19 @@ python scripts/check_architecture.py         # architecture boundaries
 | File | Tests | Covers |
 | --- | --- | --- |
 | `tests/unit/test_mt5.py` | 72 | The MT5 boundary against a fake terminal: lazy import, converters, feed, `ServerClock`, `probe_connection` |
+| `tests/strategy/test_signal.py` | 37 | The decision, the no-trade reasons, the instrument policy, and the no-look-ahead properties |
 | `tests/unit/test_config.py` | 55 | Three-layer config, unknown-key rejection, `.env` precedence, secret handling |
+| `tests/unit/test_interfaces.py` | 62 | The four protocols; every module imports; every `__all__` entry resolves |
 | `tests/unit/test_value_objects.py` | 46 | `Price`, `Money`, `Volume`, `SymbolSpecification`, point/price arithmetic |
-| `tests/unit/test_candles.py` | 43 | The freeze, the report, timezone handling, and the no-look-ahead properties |
+| `tests/unit/test_candles.py` | 43 | The freeze, the report, timezone handling, the no-look-ahead properties |
+| `tests/strategy/test_candle_direction.py` | 33 | The five verdicts, closed-candle enforcement, the doji case |
 | `tests/unit/test_architecture.py` | 34 | The architecture gate itself, including deliberately broken source |
+| `tests/strategy/test_entry_rules.py` | 25 | The two entry rules, points resolution, entry-vs-stop rounding |
+| `tests/strategy/test_strategy.py` | 24 | Construction refusals, dispatch, the self-describing rule |
 | `tests/unit/test_timeframes.py` | 27 | Period seconds, boundary math, candle closure, timezone handling |
 | `tests/unit/test_cli.py` | 25 | Parser surface, exit codes, commands whose phase has not landed |
 | `tests/unit/test_logging.py` | 25 | JSONL audit records, rotation, structural absence of secrets |
-| `tests/unit/test_interfaces.py` | 62 | The four protocols; every module imports; every `__all__` entry resolves |
-| **Total** | **406** (1 skipped) | |
+| **Total** | **533** (1 skipped) | |
 
 The one skip is the cross-check of `freeze_closed_bars` against the independent Al Brooks
 implementation, which needs the optional `albrooks` extra. It is the only skip in the suite
@@ -81,10 +85,14 @@ examples anyone thought to write:
 
 * point ↔ price conversion never drifts
 * normalized volume never exceeds the request
-* **appending future candles cannot change a decision taken at time *t*** — the
-  no-look-ahead property, and the single most important test in the project
+* **appending future candles cannot change a decision taken at time *t*** — the headline
+  no-look-ahead property, proved once for the freeze (`test_candles.py`) and again for the
+  whole strategy decision (`test_signal.py`), because a freeze that is correct can still be
+  fed the wrong candles
 * moving the reference time forward never *removes* a bar (monotonicity)
 * the same input always produces the same output
+* input order never changes the decision
+* a decision never uses a bar that had not closed at the reference
 * **Phase 6:** a trailing stop is monotonic — BUY `sl_new >= sl_old`, SELL
   `sl_new <= sl_old`
 
@@ -93,6 +101,14 @@ series rather than as one worked example, because an example only proves the fun
 behaved on the case somebody thought of. The generators vary the bar count, the offset of
 the reference moment within the series, and the timeframe step, because the interesting
 cases are the ones where the reference falls in the middle of a forming bar.
+
+**A property test that fails is not always a bug in the code.** When
+`test_appending_future_bars_cannot_change_the_decision` first failed, the correct answer
+turned out to be that the strategy was right and the *test helper* was wrong: it generated
+"future" bars anchored on the last existing bar rather than on the reference moment, so it
+sometimes produced bars the reference could legitimately see. Fixing the helper rather than
+the strategy was the right call — but only after checking, which is the whole reason to
+write the property rather than an example.
 
 ## Testing the MT5 boundary without a terminal
 

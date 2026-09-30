@@ -56,8 +56,12 @@ from the outside arrives as an argument.
 | `market_data/candles.py` | 2 | Complete — the closed-candle freeze and its report |
 | `market_data/mt5_module.py` | 2 | Complete — the one `import MetaTrader5`, the API protocol, pure converters |
 | `market_data/mt5_feed.py` | 2 | Complete — `MT5Feed`, `ServerClock`, `probe_connection` |
+| `strategy/candle_direction.py` | 3 | Complete — the M15 direction filter and its five verdicts |
+| `strategy/entry_rules.py` | 3 | Complete — BUY STOP / SELL STOP placement |
+| `strategy/signal.py` | 3 | Complete — `TradeDecision` or `NoTrade`, the instrument policy check |
+| `strategy/strategy.py` | 3 | Complete — the `StopOrderStrategy` façade |
 | `cli/main.py` | 1/2 | Contract complete; `validate-config` and `test-connection` implemented |
-| `strategy/`, `risk/`, `trailing/`, `execution/`, `lifecycle/`, `application/`, `backtest/`, `research/`, `integrations/` | 3–12 | Empty packages, present so the boundary is real from day one |
+| `risk/`, `trailing/`, `execution/`, `lifecycle/`, `application/`, `backtest/`, `research/`, `integrations/` | 4–12 | Empty packages, present so the boundary is real from day one |
 
 ## 4. The protocols
 
@@ -74,6 +78,22 @@ system testable without a broker.
 `SimulatedBroker` is **not** a test double. It is a first-class implementation and it is
 what `DRY_RUN` and the backtester run on, so dry-run exercises the same code path that
 live trading does.
+
+## 4a. Not trading is a value
+
+`strategy/signal.py` returns a union, `TradeDecision | NoTrade`, and every consumer handles
+both arms. Most of the time the correct answer is to do nothing — the M15 candle is a doji,
+the feed has no closed M15 bar, the M1 candle has not closed yet.
+
+Modelling that as an exception, a `None`, or a signal with a null side would push the work
+of distinguishing *the market is quiet* from *the feed is broken* out to every caller, and
+they would eventually disagree. `NoTrade` carries a named reason and its evidence, so
+`is_indeterminate` can separate the two.
+
+An **instrument-policy refusal is the exception** to this: it raises, because reaching that
+check means the configuration or the feed is wrong, and a run that silently declines to
+trade all day is the worst possible outcome — it looks like a strategy that simply is not
+triggering.
 
 ## 5. Numbers are `Decimal`
 

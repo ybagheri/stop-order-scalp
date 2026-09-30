@@ -355,6 +355,30 @@ class SymbolSpecification:
         rounding = ROUND_FLOOR if side is Side.SIDE_BUY else ROUND_CEILING
         return Price(raw.quantize(self.tick_size, rounding=rounding), self.digits)
 
+    def round_entry_price(self, price: Price | Decimal | int, side: Side) -> Price:
+        """Round a pending *entry* price away from the candle it was derived from.
+
+        Deliberately **not** :meth:`round_stop_price`, even though the two look like mirror
+        images. They are not, and reusing one for the other inverts the rounding:
+
+        * :meth:`round_stop_price` is anchored on the **entry** -- a BUY stop sits below it,
+          so away from the anchor means rounding **down**.
+        * this method is anchored on the **candle's extreme** -- a BUY STOP *entry* sits
+          above the high, so away from the anchor means rounding **up**.
+
+        Getting the sign backwards makes the order trigger a tick *before* the level the
+        strategy specified, which is a different trade from the one that was configured. It
+        also moves the order closer to the market, which is where a broker's
+        ``stops_level`` rejection lives.
+
+        Only ever non-trivially different when a price arrives off the tick grid, which a
+        well-behaved broker will not do -- so this is a correctness guarantee, not a
+        workaround.
+        """
+        raw = price.value if isinstance(price, Price) else _to_decimal(price, "price")
+        rounding = ROUND_CEILING if side is Side.SIDE_BUY else ROUND_FLOOR
+        return Price(raw.quantize(self.tick_size, rounding=rounding), self.digits)
+
     def round_target_price(self, price: Price | Decimal | int, side: Side) -> Price:
         """Round a take profit *away from entry*, so it is never easier to reach.
 

@@ -10,9 +10,9 @@
 
 ## Current Phase
 
-**Phase 2 — Market Data — COMPLETE and green.**
+**Phase 3 — Core Strategy — COMPLETE and green.**
 
-Next phase to execute: **Phase 3 — Core Strategy.**
+Next phase to execute: **Phase 4 — Risk Engine.**
 
 ---
 
@@ -61,13 +61,27 @@ table.
 * `market_data/mt5_feed.py` — `MT5Feed`, `ServerClock`, `probe_connection`.
 * `docs/mt5/SETUP.md` and `docs/mt5/SYMBOL_SPECIFICATIONS.md`.
 * `tests/unit/test_candles.py` and `tests/unit/test_mt5.py`, including the no-look-ahead
-  property.
+  property for the freeze.
+
+### Phase 3 — Core Strategy
+
+* `strategy/candle_direction.py` — the M15 direction filter: five verdicts, two of which
+  authorise a trade. A doji has no direction; a missing candle is not a neutral candle.
+* `strategy/entry_rules.py` — `BUY STOP = M1.high + offset_points`,
+  `SELL STOP = M1.low - offset_points`, every point conversion through the specification.
+* `strategy/signal.py` — `Decision = TradeDecision | NoTrade`, plus the US30-only check.
+* `strategy/strategy.py` — the stateless `StopOrderStrategy` façade.
+* `docs/strategy/ENTRY_RULES.md` and `docs/strategy/README.md`.
+* 119 tests in `tests/strategy/`, including the headline no-look-ahead property proved on
+  the **whole decision** rather than only on the freeze.
 
 ## Files Added
 
 ```
 docs/architecture/ARCHITECTURE.md
 docs/strategy/BASELINE.md
+docs/strategy/ENTRY_RULES.md
+docs/strategy/README.md
 docs/risk/README.md
 docs/mt5/README.md
 docs/mt5/SETUP.md
@@ -78,6 +92,15 @@ docs/research/README.md
 src/stop_order_scalp/market_data/candles.py
 src/stop_order_scalp/market_data/mt5_module.py
 src/stop_order_scalp/market_data/mt5_feed.py
+src/stop_order_scalp/strategy/candle_direction.py
+src/stop_order_scalp/strategy/entry_rules.py
+src/stop_order_scalp/strategy/signal.py
+src/stop_order_scalp/strategy/strategy.py
+tests/strategy/conftest.py
+tests/strategy/test_candle_direction.py
+tests/strategy/test_entry_rules.py
+tests/strategy/test_signal.py
+tests/strategy/test_strategy.py
 tests/unit/test_architecture.py
 tests/unit/test_cli.py
 tests/unit/test_interfaces.py
@@ -86,6 +109,15 @@ tests/unit/test_mt5.py
 ```
 
 ## Files Modified
+
+Phase 3:
+
+```
+src/stop_order_scalp/domain/value_objects/price.py   added round_entry_price
+src/stop_order_scalp/strategy/*.py                    the strategy layer, new
+tests/strategy/*                                       119 tests
+docs/strategy/*                                        ENTRY_RULES.md, README.md
+```
 
 Phase 2:
 
@@ -115,7 +147,7 @@ tests/conftest.py, tests/unit/*.py            annotations, hermetic .env
 
 ## Tests
 
-406 passing, 1 skipped.
+533 passing, 1 skipped.
 
 | File | Tests |
 | --- | --- |
@@ -124,10 +156,14 @@ tests/conftest.py, tests/unit/*.py            annotations, hermetic .env
 | `tests/unit/test_config.py` | 55 |
 | `tests/unit/test_value_objects.py` | 46 |
 | `tests/unit/test_candles.py` | 43 |
+| `tests/strategy/test_signal.py` | 37 |
 | `tests/unit/test_architecture.py` | 34 |
+| `tests/strategy/test_candle_direction.py` | 33 |
 | `tests/unit/test_timeframes.py` | 27 |
+| `tests/strategy/test_entry_rules.py` | 25 |
 | `tests/unit/test_cli.py` | 25 |
 | `tests/unit/test_logging.py` | 25 |
+| `tests/strategy/test_strategy.py` | 24 |
 
 The single skip is the `albrooks` cross-check of `freeze_closed_bars`, which needs the
 optional extra. It is the only skip in the suite, and is acceptable only because that extra
@@ -136,17 +172,17 @@ is genuinely optional.
 ## Test Results
 
 ```
-python -m pytest                             406 passed, 1 skipped
+python -m pytest                             533 passed, 1 skipped
 python -m ruff check .                       All checks passed!
-python -m mypy                               Success: no issues found in 41 source files
-python scripts/check_architecture.py         architecture OK: 29 modules checked
+python -m mypy                               Success: no issues found in 48 source files
+python scripts/check_architecture.py         architecture OK: 33 modules checked
 python -m stop_order_scalp validate-config   exit 0
 python -m stop_order_scalp test-connection   exit 3, reports package_installed: false
 ```
 
 ## Git Commit
 
-`feat(market-data): MetaTrader 5 feed, closed-candle freeze, broker server clock`
+`feat(strategy): M15 direction filter, M1 stop entries, and the no-look-ahead proof`
 
 ## Git Push
 
@@ -161,7 +197,7 @@ src/stop_order_scalp/
     domain/          IMPLEMENTED — value objects, enums, models, exceptions, protocols
     infrastructure/  IMPLEMENTED — config, logging, clock
     market_data/     IMPLEMENTED — timeframes, candles/freeze, mt5_module, mt5_feed
-    strategy/        empty      Phase 3
+    strategy/        IMPLEMENTED — candle_direction, entry_rules, signal, strategy
     risk/            empty      Phase 4
     execution/       empty      Phases 5, 6
     trailing/        empty      Phase 6
@@ -171,7 +207,7 @@ src/stop_order_scalp/
     research/        empty      Phase 12
     application/     empty      composition + orchestration
     cli/             IMPLEMENTED — contract + validate-config + test-connection
-tests/               unit (406). integration/ exists but is empty.
+tests/              unit (414) + strategy (119). integration/ exists but is empty.
 config/default.yaml  strategy defaults
 scripts/             check_architecture.py
 ```
@@ -240,7 +276,7 @@ Phases 2 through 12, exactly as listed in `ROADMAP.md`. In order:
 
 1. Project foundation — **done**
 2. Market data — **done**
-3. Core strategy
+3. Core strategy — **done**
 4. Risk engine
 5. Order execution
 6. Position management
@@ -268,6 +304,10 @@ Phases 2 through 12, exactly as listed in `ROADMAP.md`. In order:
   [`docs/mt5/SETUP.md`](docs/mt5/SETUP.md) §1. Nothing in the repository imports it at
   module scope, and the whole suite passes without it. `test-connection` currently reports
   `package_installed: false` and exits 3, which is the correct behaviour, not a failure.
+* **Never edit a Persian or accented `.md` file with PowerShell `Set-Content`.** It writes
+  in the ANSI codepage and destroys the text. This happened to `README.fa.md` during Phase 3
+  and was caught only by scanning every file for invalid UTF-8; use the editor tools, which
+  write UTF-8. `python -c` with an explicit `encoding="utf-8"` is the safe way to check.
 * **A `.env` in the working directory leaks into tests.** `load_config(env_file=None)`
   auto-discovers it. The test helpers pass an explicit non-existent path; if you add a
   test that calls `load_config` directly, do the same or it will depend on the developer's
@@ -330,6 +370,20 @@ Phases 2 through 12, exactly as listed in `ROADMAP.md`. In order:
     `trade_mode` defaults to *demo*, so a misdetected live account fails closed.
 17. **Symbol matching is exact and case-insensitive, never fuzzy.** `US30` can never select
     `US30mini` or `EURUSD30` by accident.
+18. **Not trading is a value, not a failure.** The decision is `TradeDecision | NoTrade`,
+    and `NoTrade` carries a named reason plus its evidence. Most of the time the correct
+    answer is to do nothing; modelling that as an exception or a null signal would push
+    the work of telling a quiet market from a broken feed out to every caller.
+19. **An instrument-policy refusal raises rather than returning `NoTrade`.** Reaching that
+    check means the configuration or the feed is wrong, and a run that silently declines to
+    trade all day is the worst possible outcome — it looks like a strategy that simply is
+    not triggering.
+20. **A doji is never traded and never falls back to an earlier directional candle.** "Use
+    the last candle that had a direction" changes the rule from *most recent* to *most recent
+    directional*, which is a different strategy.
+21. **Entry rounding and stop rounding are different methods with opposite signs.**
+    `round_entry_price` is anchored on the candle's extreme; `round_stop_price` is anchored
+    on the entry. Mixing them up moves every order a tick toward the market.
 
 ## Configuration
 
@@ -349,44 +403,51 @@ code reads the variable.
 
 ## Next Recommended Phase
 
-**Phase 3 — Core Strategy.** Start at `ROADMAP.md` §"Phase 3", with
-`docs/strategy/BASELINE.md` and `docs/architecture/ARCHITECTURE.md` §5–§6 as the design
-input.
+**Phase 4 — Risk Engine.** Start at `ROADMAP.md` §"Phase 4", with
+`docs/strategy/ENTRY_RULES.md`, `docs/mt5/SYMBOL_SPECIFICATIONS.md` §2 and
+`docs/strategy/BASELINE.md` §4 as the design input.
 
-The pieces Phase 3 needs all exist:
+The pieces Phase 4 needs all exist:
 
-| What Phase 3 needs | Where it is |
+| What Phase 4 needs | Where it is |
 | --- | --- |
-| `Candle` with `is_closed_at`, `direction`, `is_doji` | `domain/models.py` |
-| `freeze_closed_bars` + `FreezeReport` | `market_data/candles.py` |
-| `Timeframe` names, `period_seconds`, `floor_time` | `market_data/timeframes.py` |
-| `Side`, `TimeframeSelection`, `InstrumentPolicy` | `domain/enums.py`, `domain/models.py` |
-| `TradeSignal` | `domain/models.py` |
-| `SymbolSpecification.points_to_price` | `domain/value_objects/price.py` |
-| `MarketDataProvider` | `domain/interfaces.py` |
+| `SymbolSpecification`: `tick_value`, `contract_size`, `points_to_price`, `normalize_volume`, `round_stop_price`, `round_entry_price` | `domain/value_objects/price.py` |
+| `Money`, `Price`, `Volume` | `domain/value_objects/price.py` |
+| `TradePlan` with the three risk figures already separate | `domain/models.py` |
+| `RiskAssessment` (with `reject()` as a classmethod) | `domain/models.py` |
+| `RiskMode`, `TargetMode`, `CommissionMode` | `domain/enums.py` |
+| `RiskSettings`, `TargetSettings`, `StopLossSettings` | `infrastructure/config.py` |
+| `AccountSnapshot` (balance, equity, margin) | `domain/models.py` |
+| `TradeSignal` / `TradeDecision` as the input | `strategy/signal.py` |
 
 Concretely, in order:
 
-1. `strategy/candle_direction.py` — the M15 direction filter, reading the **last closed**
-   M15 candle. Handle the doji case explicitly: `Candle.direction` already returns `None`,
-   and a doji must not be turned into a trade.
-2. `strategy/entry_rules.py` — BUY STOP = `M1.high + offset_points`, SELL STOP =
-   `M1.low − offset_points`, converted through `SymbolSpecification.points_to_price`.
-   **Never multiply a point count by a price.**
-3. `strategy/signal.py` and `strategy/strategy.py` — produce a `TradeSignal` or a
-   `NoTrade`. The no-trade path must be a first-class result, not an exception.
-4. Enforce US30-only via `InstrumentPolicy`.
-5. The no-look-ahead property test, extending the one already in
-   `tests/unit/test_candles.py::TestNoLookAhead` to the full decision, not just the freeze:
-   **appending future candles cannot change a decision taken at time *t***. This is the
-   project's headline correctness property and it is a release gate.
-6. `docs/strategy/` — document the selection rule and why the closed candle is mandatory.
-7. Gates, then `ROADMAP.md` → `HANDOFF.md` → `CHANGELOG.md` → `README.md` → `README.fa.md`
+1. `risk/commission.py` — `per_lot_round_trip` versus `per_lot_per_side`. Read
+   `CommissionMode` rather than inventing a third shape.
+2. `risk/position_sizer.py` — `percent_balance` and `fixed_lot`. **The budget is compared
+   against `total_risk`, not `price_risk`**, and the size **rounds down** to
+   `volume_step`; with `refuse_below_min_volume`, a size below the broker minimum is
+   refused rather than rounded up, because up-rounding exceeds the budget. The worked
+   example is in `docs/mt5/SYMBOL_SPECIFICATIONS.md` §2 — 0.5 % of $10,000 against a
+   $100/lot risk and $6/lot commission gives 0.4 lots, while the naive 0.5 lots would carry
+   $53 of a $50 budget.
+3. `risk/stop_loss.py` and `risk/take_profit.py` — `StopLossProvider` /
+   `TakeProfitProvider` interfaces with fixed-points, risk-reward and signal-defined
+   implementations. The `1:1` R:R precedence rule against the fixed 1000-point TP is the
+   part to get right; see `TargetMode` and `TargetSettings` for the modes already modelled.
+4. `risk/risk_manager.py` — `RiskAssessment`. Validate volume bounds, stop distance
+   against `SymbolSpecification.stops_level`, `max_total_risk_fraction`, and reject with a
+   **machine-readable `code`**, using `RiskAssessment.reject(code, reason)`.
+5. `docs/risk/RISK_MODEL.md` — the sizing derivation and the three distinguishable figures.
+6. Gates, then `ROADMAP.md` → `HANDOFF.md` → `CHANGELOG.md` → `README.md` → `README.fa.md`
    → commit → push.
 
-**Note on the strategy contract:** `entry.candle_selection` already supports
-`current_forming` for research. The baseline is `last_closed`. Do not let the research mode
-leak into the baseline path, and keep `filters_enabled: false`.
+**Two things to carry forward from Phase 3.** The strategy deliberately supplies no stop
+loss and no take profit, so the risk engine is the only thing that produces them — keep it
+that way, or it becomes impossible to tell which signals carried geometry. And
+`round_stop_price` is anchored on the *entry* while `round_entry_price` is anchored on the
+*candle extreme*; the SL/TP code wants the former, and mixing them up inverts the sign of the
+protection.
 
 ## Important Notes For The Next AI Agent
 
