@@ -7,11 +7,19 @@
 > **Status: under active development.** See [`ROADMAP.md`](ROADMAP.md) for what exists
 > today and [`HANDOFF.md`](HANDOFF.md) for the state of the last completed phase.
 >
+> **Phase 1 (project foundation) is complete.** The domain layer, configuration, logging,
+> clock, timeframes and the architecture gate are implemented and tested — 274 tests, no
+> broker required. Of the seven CLI commands below, **only `validate-config` works**; the
+> other six exit with code **4** and say which phase has not landed yet. The command
+> surface is fixed ahead of its implementations on purpose, so the contract is testable
+> now.
+>
 > **No profitability is claimed.** See [`docs/strategy/BASELINE.md`](docs/strategy/BASELINE.md).
 >
 > **Risk warning.** Automated trading carries substantial risk of loss. Start in
-> `DRY_RUN`, then `PAPER`, then a demo account. Never run this on a live account without
-> reading [`docs/operations/LIVE_DEPLOYMENT.md`](docs/operations/LIVE_DEPLOYMENT.md).
+> `DRY_RUN`, then `PAPER`, then a demo account. `LIVE` is not implemented and is gated
+> three times over; read [`docs/operations/`](docs/operations/) before going anywhere near
+> it.
 
 ---
 
@@ -77,6 +85,30 @@ Execution modes (`SOS_ENVIRONMENT`): `DRY_RUN` (default) → `PAPER` → `DEMO` 
 Each account-changing operation has its **own** opt-in switch, and `LIVE` additionally
 requires `SOS_ALLOW_LIVE=true`. There is no path that reaches live trading by accident.
 
+### Exit codes
+
+Part of the contract, because a supervisor process depends on them.
+
+| Code | Meaning |
+| --- | --- |
+| 0 | Success |
+| 1 | Ran and failed (broker refused, order rejected) |
+| 2 | Refused before doing anything (bad config, safety gate) |
+| 3 | Not connected to MetaTrader 5 |
+| 4 | The command exists, but the phase implementing it has not been built yet |
+
+## Development
+
+```bash
+python -m pytest                             # 274 tests
+python -m ruff check .                       # lint
+python -m mypy                               # types, strict, src + tests
+python scripts/check_architecture.py         # architecture boundaries
+```
+
+`pytest` covers all four gates, but run them individually while working so the output is
+legible. See [`docs/testing/`](docs/testing/) and [`CONTRIBUTING.md`](CONTRIBUTING.md).
+
 ## Configuration
 
 Strategy parameters: [`config/default.yaml`](config/default.yaml).
@@ -85,35 +117,41 @@ Machine-specific values (MT5 path, login, server, magic number, mode): `.env`
 
 ```yaml
 symbol: US30
+symbol_aliases: [US30, US30.cash, US30m, DJ30]   # exact, case-insensitive; no fuzzy match
 
 entry:
   timeframe: M1
   direction_timeframe: M15
-  offset_points: 10
-  use_forming_candles: false          # false = last CLOSED candle only (no look-ahead)
+  offset_points: 10                            # BUY STOP = high+10, SELL STOP = low-10
+  candle_selection: last_closed                # never the forming candle: no look-ahead
 
 risk:
-  mode: percent_balance               # or: fixed_lot
+  mode: percent_balance                         # or: fixed_lot
   percent: 0.5
   fixed_lot: 0.10
   commission_per_lot: 6.0
   commission_mode: per_lot_round_trip
 
 target:
-  mode: fixed_points                  # or: risk_reward
+  mode: fixed_points                            # or: risk_reward
   take_profit_points: 1000
   risk_reward: 1.0
-  stop_loss_points: 100               # distance from entry when mode needs an SL
+  stop_loss_points: 100                         # distance from entry when a mode needs an SL
 
 break_even:
   enabled: true
   trigger_points: 50
-  include_commission: false
+  mode: entry                                   # or: commission_aware
 
 trailing:
   enabled: true
   distance_points: 100
+  min_step_points: 1                            # no modify request on every tick
 ```
+
+An unknown key anywhere in this file is a **hard error naming the section**, not a
+warning. A typo in a risk parameter that is silently ignored is the most expensive kind of
+configuration bug there is.
 
 ## Architecture
 

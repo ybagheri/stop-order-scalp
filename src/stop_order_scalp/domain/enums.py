@@ -10,8 +10,8 @@ from __future__ import annotations
 from enum import StrEnum
 
 __all__ = [
-    "BreakEventKind",
     "BreakEvenMode",
+    "BreakEventKind",
     "CommissionMode",
     "Environment",
     "ExecutionMode",
@@ -266,9 +266,19 @@ class LifecycleState(StrEnum):
         )
 
     @property
+    def is_terminal(self) -> bool:
+        """Whether this state is absorbing: its only legal successor is ``STATE_IDLE``.
+
+        ``STATE_HALTED`` is the only terminal state today. It is spelled as a property
+        rather than an inline comparison so that adding an absorbing state later is a
+        one-line change and every existing caller of ``is_terminal`` keeps working.
+        """
+        return self is LifecycleState.STATE_HALTED
+
+    @property
     def is_recoverable(self) -> bool:
         """Whether restarting the process from this state is meaningful."""
-        return not self.is_terminal and self is not LifecycleState.STATE_HALTED
+        return not self.is_terminal
 
 
 class BreakEventKind(StrEnum):

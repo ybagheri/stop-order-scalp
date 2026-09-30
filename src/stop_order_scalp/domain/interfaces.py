@@ -173,12 +173,16 @@ class PositionManagerBroker(Protocol):
 
 @runtime_checkable
 class Broker(
-    Protocol,
     AccountReader,
     OrderBookReader,
     OrderExecutor,
+    Protocol,
 ):
     """Everything the execution layer is allowed to do to a venue.
+
+    ``Protocol`` is listed **last**, not first. Naming it first alongside protocols that
+    already inherit from it produces an inconsistent MRO, and the class then cannot be
+    created at all -- which is a ``TypeError`` at import time, not a subtle bug.
 
     Two implementations exist and both are first class:
 

@@ -30,7 +30,7 @@ from datetime import timedelta
 from decimal import Decimal
 from enum import Enum
 from pathlib import Path
-from typing import Any, Final
+from typing import Any, Final, TypeVar
 
 import yaml
 
@@ -60,7 +60,6 @@ __all__ = [
     "IntegrationSettings",
     "LoggingSettings",
     "OrderSettings",
-    "PathSettings",
     "ProjectPaths",
     "RetrySettings",
     "RiskSettings",
@@ -81,6 +80,10 @@ DEFAULT_CONFIG_RELATIVE: Final[str] = "config/default.yaml"
 #: configuration load, and reduced immediately to a presence flag. Nothing else in the
 #: codebase ever reads them, so there is no code path that could put one in a log.
 _SECRET_ENV_KEYS: Final[frozenset[str]] = frozenset({"SOS_MT5_PASSWORD"})
+
+#: The concrete settings type :func:`_coerce` builds. Binding it to a TypeVar means every
+#: call site is typed as the dataclass it asked for, not as ``Any``.
+_SettingsT = TypeVar("_SettingsT")
 
 
 # =============================================================================
@@ -663,11 +666,11 @@ def load_config(
     raw = _read_yaml(strategy_yaml)
     _reject_unknown_keys(raw, strategy_yaml)
 
-    env_values, env_path = load_env_file(env_file)
+    _env_values, env_path = load_env_file(env_file)
 
     # ``load_env_file`` used ``setdefault``, so ``os.environ`` now holds the merge of the
     # file and the real environment, with the real environment winning. Reading it back is
-    # therefore the authoritative view of this layer -- reading ``env_values`` alone would
+    # therefore the authoritative view of this layer -- reading ``_env_values`` alone would
     # silently ignore every variable exported by a shell or a service manager.
     layer: dict[str, Any] = {
         key: value for key, value in os.environ.items() if key.startswith(CONFIG_ENV_PREFIX)
@@ -675,7 +678,7 @@ def load_config(
     if overrides:
         layer.update(overrides)
 
-    _apply_env_overrides(raw, layer, strategy_yaml)
+    _apply_env_overrides(raw, layer)
 
     sources = [strategy_yaml] + ([env_path] if env_path else [])
 
@@ -721,13 +724,16 @@ def _build_execution(raw: Mapping[str, Any], environment: EnvironmentSettings) -
     retry_payload = dict(payload.pop("retry", None) or {})
 
     yaml_magic = payload.pop("magic_number", None)
-    if yaml_magic is not None and _env_supplied("MAGIC_NUMBER"):
-        if int(yaml_magic) != environment.magic_number:
-            raise ConfigError(
-                f"magic_number disagrees: execution.magic_number={yaml_magic} but "
-                f"{CONFIG_ENV_PREFIX}MAGIC_NUMBER={environment.magic_number}. Orders placed "
-                "under one magic number are invisible to the other; pick one."
-            )
+    if (
+        yaml_magic is not None
+        and _env_supplied("MAGIC_NUMBER")
+        and int(yaml_magic) != environment.magic_number
+    ):
+        raise ConfigError(
+            f"magic_number disagrees: execution.magic_number={yaml_magic} but "
+            f"{CONFIG_ENV_PREFIX}MAGIC_NUMBER={environment.magic_number}. Orders placed "
+            "under one magic number are invisible to the other; pick one."
+        )
 
     payload["magic_number"] = environment.magic_number
     return _coerce(
@@ -845,7 +851,7 @@ def _reject_unknown_keys(raw: Mapping[str, Any], path: Path) -> None:
                 raise ConfigError(f"{path}: unknown keys under 'execution.retry': {unknown_retry}")
 
 
-def _apply_env_overrides(raw: dict[str, Any], values: Mapping[str, Any], path: Path) -> None:
+def _apply_env_overrides(raw: dict[str, Any], values: Mapping[str, Any]) -> None:
     """Apply ``SOS_*`` overrides onto the parsed YAML, in place.
 
     Recognised shapes:
@@ -1084,7 +1090,7 @@ def _enum(value: Any, enum_type: type, default: Any) -> Any:
     raise ConfigError(f"expected one of [{options}], got {value!r}")
 
 
-def _coerce(factory: type, payload: Mapping[str, Any], section: str) -> Any:
+def _coerce(factory: type[_SettingsT], payload: Mapping[str, Any], section: str) -> _SettingsT:
     """Build a settings dataclass from raw YAML, coercing types and reporting cleanly.
 
     Every failure names the section, because "invalid literal for int()" with a bare
@@ -1134,7 +1140,7 @@ def _coerce_value(key: str, value: Any, annotation: Any, section: str) -> Any:
     if annotation is Decimal:
         try:
             return _decimal(value)
-        except Exception as exc:  # noqa: BLE001 - decimal raises several unrelated types
+        except Exception as exc:
             raise ConfigError(f"{section}.{key} must be a decimal, got {value!r}") from exc
     if annotation is bool:
         return _flag(value)

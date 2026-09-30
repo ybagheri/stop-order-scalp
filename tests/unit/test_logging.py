@@ -13,6 +13,7 @@ from __future__ import annotations
 import io
 import json
 import logging
+from collections.abc import Iterator
 from datetime import UTC, datetime
 from decimal import Decimal
 from pathlib import Path
@@ -36,7 +37,7 @@ from stop_order_scalp.infrastructure.logging import (
 
 
 @pytest.fixture
-def sink(tmp_path: Path) -> AuditLogger:
+def sink(tmp_path: Path) -> Iterator[AuditLogger]:
     logger = AuditLogger(tmp_path / "logs")
     yield logger
     logger.close()

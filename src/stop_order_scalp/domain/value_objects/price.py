@@ -452,7 +452,8 @@ class SymbolSpecification:
         """
         distance = entry.absolute_distance_to(stop)
         ticks = distance / self.tick_size
-        return Money(ticks * self.tick_value * volume.lots, self.currency)
+        lots = volume.lots if isinstance(volume, Volume) else _to_decimal(volume, "volume")
+        return Money(ticks * self.tick_value * lots, self.currency)
 
     def __str__(self) -> str:
         return (

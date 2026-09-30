@@ -20,6 +20,7 @@ from __future__ import annotations
 
 import os
 import time
+from collections.abc import Callable
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal
 from pathlib import Path
@@ -57,7 +58,7 @@ def reference_now() -> datetime:
 
 
 @pytest.fixture
-def clock() -> "object":
+def clock() -> object:
     from stop_order_scalp.infrastructure.clock import FixedClock
 
     return FixedClock(REFERENCE_NOW)
@@ -157,14 +158,19 @@ def make_candle(
     )
 
 
+#: The callable shape ``candle_factory`` exposes, named so test modules can annotate the
+#: fixture parameter instead of leaving it implicit.
+CandleFactory = Callable[..., Candle]
+
+
 @pytest.fixture
-def candle_factory():
+def candle_factory() -> CandleFactory:
     """The :func:`make_candle` helper, injected."""
     return make_candle
 
 
 @pytest.fixture
-def m1_candles(candle_factory) -> list[Candle]:
+def m1_candles(candle_factory: CandleFactory) -> list[Candle]:
     """Three closed M1 candles and the currently forming one.
 
     ``closed_only`` on the last one is what makes this fixture useful for look-ahead
@@ -203,7 +209,6 @@ __all__ = [
     "Candle",
     "Money",
     "Price",
-    "REFERENCE_NOW",
     "Side",
     "SymbolSpecification",
     "Volume",

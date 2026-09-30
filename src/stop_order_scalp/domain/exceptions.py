@@ -18,6 +18,7 @@ __all__ = [
     "BrokerError",
     "BrokerNotConnectedError",
     "BrokerRejectedError",
+    "ComponentNotAvailableError",
     "ConfigError",
     "DomainError",
     "ExecutionUnknownError",
@@ -31,8 +32,8 @@ __all__ = [
     "OrderValidationError",
     "PersistenceError",
     "PositionNotFoundError",
-    "RiskError",
     "RetryableError",
+    "RiskError",
     "StaleStateError",
     "StopOrderScalpError",
     "SymbolNotFoundError",
@@ -53,6 +54,17 @@ class ConfigError(StopOrderScalpError):
 
     Raised during load and during validation. Never swallowed: a system running on
     half-understood parameters is worse than a system that refuses to start.
+    """
+
+
+class ComponentNotAvailableError(StopOrderScalpError):
+    """A command was invoked before the phase that implements it has been built.
+
+    The CLI contract is defined in Phase 1, before the market-data, execution, lifecycle
+    and backtest components behind most subcommands exist. Invoking one of those
+    subcommands today must produce a named, exit-coded failure rather than an
+    ``ImportError`` traceback, so the contract is testable now and each implementation
+    drops in later without the dispatcher changing.
     """
 
 

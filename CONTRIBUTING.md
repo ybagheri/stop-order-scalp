@@ -10,7 +10,10 @@ Read, in this order:
 1. [`HANDOFF.md`](HANDOFF.md) — current state, decisions, remaining work
 2. [`ROADMAP.md`](ROADMAP.md) — the phase you are working on
 3. [`README.md`](README.md) — how the system is used
-4. [`docs/architecture/PHASE0_AUDIT.md`](docs/architecture/PHASE0_AUDIT.md) — why it is
+4. [`docs/architecture/ARCHITECTURE.md`](docs/architecture/ARCHITECTURE.md) — the layer
+   model and the enforced boundaries
+5. [`docs/strategy/BASELINE.md`](docs/strategy/BASELINE.md) — the frozen strategy
+6. [`docs/architecture/PHASE0_AUDIT.md`](docs/architecture/PHASE0_AUDIT.md) — why it is
    built this way
 
 ## The one rule that overrides everything
@@ -51,12 +54,13 @@ Optional extras:
 
 ```bash
 python -m ruff check .
-python -m mypy src tests
+python -m mypy
 python -m pytest
 python scripts/check_architecture.py
 ```
 
-A change is not finished until all four are green.
+A change is not finished until all four are green. `pytest` runs the last three as part of
+the suite, but run them individually while working so the output is legible.
 
 ### Architecture gate
 
@@ -68,8 +72,17 @@ A change is not finished until all four are green.
 * `albrooks` is imported anywhere except `integrations/al_brooks_adapter.py`
 * a layer boundary is violated (e.g. `domain/` importing from `execution/`)
 * a `float` is used for money, price or volume in the domain, risk or trailing layers
+* an absolute machine path (`C:\…`, `/home/…`) appears in application source
+* a naive `datetime.now()` / `utcnow()` is called, or `time` is imported directly, outside
+  the three modules allowed to read the wall clock
 
 Do not add `# noqa` to silence these. Fix the import.
+
+**If you add a rule, add its negative test in the same commit.**
+`tests/unit/test_architecture.py` feeds deliberately broken source through the checker and
+asserts each rule fires. This is not ceremony: four of the six original rules had never
+once fired, because their allowlists held unqualified module names and one regex could
+never match. A rule with no negative test has not been shown to work.
 
 ## Style
 
@@ -94,6 +107,14 @@ Do not add `# noqa` to silence these. Fix the import.
 * Deterministic ordering: no reliance on dict iteration order for output, no wall clock.
 * A test that cannot fail is not a test. Prefer assertions on behaviour over assertions
   on log strings.
+* **`load_config(env_file=None)` auto-discovers a `.env` in the current working directory
+  and merges it into `os.environ`.** A test that calls it with the default will read the
+  developer's real machine settings and may silently stop testing anything. Pass an
+  explicit non-existent path — a missing explicit `.env` is not an error, it just
+  contributes no layer. `tests/unit/test_config.py` shows the pattern and pins both halves
+  of the behaviour.
+* `mypy` checks `tests` as well as `src`, with `strict = true`. An unannotated test helper
+  fails the build.
 
 ## Secrets
 
@@ -121,6 +142,7 @@ No meaningless commits. Do not commit and then immediately amend to fix the mess
 
 - [ ] `ruff`, `mypy`, `pytest`, `check_architecture.py` all green
 - [ ] New behaviour has tests, including the failure path
+- [ ] Any new architecture rule has a negative test
 - [ ] Documentation updated — `docs/` first, then `README.md` **and** `README.fa.md`
 - [ ] `ROADMAP.md`, `HANDOFF.md`, `CHANGELOG.md` updated
 - [ ] `git status` clean, no secrets in the diff

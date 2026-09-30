@@ -10,6 +10,7 @@ from datetime import UTC, datetime, timedelta
 
 import pytest
 
+from conftest import CandleFactory
 from stop_order_scalp.domain.exceptions import MarketDataError
 from stop_order_scalp.market_data.timeframes import (
     MT5_ENCODED,
@@ -128,7 +129,7 @@ class TestBoundaries:
 
 
 class TestCandleClosure:
-    def test_a_bar_is_closed_once_its_close_time_has_passed(self, candle_factory) -> None:
+    def test_a_bar_is_closed_once_its_close_time_has_passed(self, candle_factory: CandleFactory) -> None:
         from datetime import timedelta as td
 
         opened = datetime(2026, 3, 12, 12, 30, tzinfo=UTC)
@@ -139,12 +140,12 @@ class TestCandleClosure:
         # The boundary is inclusive: at exactly the close time the bar is complete.
         assert candle.is_closed_at(opened + td(seconds=60))
 
-    def test_close_time_is_open_time_plus_the_period(self, candle_factory) -> None:
+    def test_close_time_is_open_time_plus_the_period(self, candle_factory: CandleFactory) -> None:
         opened = datetime(2026, 3, 12, 12, 30, tzinfo=UTC)
         candle = candle_factory(opened, "40010.0", "39990.0", "40000.0", timeframe_seconds=900)
         assert candle.close_time == opened + timedelta(minutes=15)
 
-    def test_closure_does_not_consult_the_wall_clock(self, candle_factory) -> None:
+    def test_closure_does_not_consult_the_wall_clock(self, candle_factory: CandleFactory) -> None:
         # Two calls at the same reference moment must agree forever. A candle that could
         # change its answer because the machine's clock moved would be untestable.
         opened = datetime(2026, 3, 12, 12, 30, tzinfo=UTC)
@@ -152,7 +153,7 @@ class TestCandleClosure:
         reference = opened + timedelta(seconds=30)
         assert candle.is_closed_at(reference) == candle.is_closed_at(reference)
 
-    def test_a_misaligned_feed_is_detectable(self, candle_factory) -> None:
+    def test_a_misaligned_feed_is_detectable(self, candle_factory: CandleFactory) -> None:
         # Candle open times that are not on a boundary mean the feed's boundaries differ
         # from ours, shifting every "is this closed" answer.
         misaligned = candle_factory(datetime(2026, 3, 12, 12, 30, 30, tzinfo=UTC), "40010.0", "39990.0", "40000.0")
@@ -160,7 +161,7 @@ class TestCandleClosure:
         assert not misaligned.close_time_is_floor()
         assert aligned.close_time_is_floor()
 
-    def test_a_m15_candle_is_closed_fifteen_minutes_after_it_opens(self, candle_factory) -> None:
+    def test_a_m15_candle_is_closed_fifteen_minutes_after_it_opens(self, candle_factory: CandleFactory) -> None:
         opened = datetime(2026, 3, 12, 12, 30, tzinfo=UTC)
         candle = candle_factory(
             opened, "40010.0", "39990.0", "40000.0", timeframe="M15", timeframe_seconds=900

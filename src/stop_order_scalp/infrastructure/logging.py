@@ -136,7 +136,7 @@ class MemoryAuditSink:
     dropped once the cap is reached.
     """
 
-    __slots__ = ("_records", "_limit")
+    __slots__ = ("_limit", "_records")
 
     def __init__(self, limit: int = 10_000) -> None:
         self._records: list[dict[str, Any]] = []
@@ -173,6 +173,7 @@ class NullAuditSink:
     __slots__ = ()
 
     def emit(self, event: dict[str, Any]) -> None:
+        del event  # the parameter exists to satisfy AuditSink; it is deliberately dropped
         return None
 
     def flush(self) -> None:
@@ -186,21 +187,21 @@ class AuditLogger:
     ``emit`` and ``flush``, so no separate adapter is needed.
     """
 
-    __slots__ = ("_logger", "_handler", "_path")
+    __slots__ = ("_handler", "_logger", "_path")
 
     def __init__(self, directory: Path | str, *, filename: str = "audit.log", level: int = logging.INFO) -> None:
         self._path = Path(directory).expanduser().resolve()
         self._path.mkdir(parents=True, exist_ok=True)
-        self._logger = _install(
-            logging.handlers.RotatingFileHandler(
-                self._path / filename,
-                maxBytes=_MAX_BYTES,
-                backupCount=_BACKUP_COUNT,
-                encoding="utf-8",
-            ),
-            level=level,
+        # The concrete handler is kept, not a reference read back out of the logger:
+        # ``baseFilename`` is declared on FileHandler, not on the Handler base class.
+        handler = logging.handlers.RotatingFileHandler(
+            self._path / filename,
+            maxBytes=_MAX_BYTES,
+            backupCount=_BACKUP_COUNT,
+            encoding="utf-8",
         )
-        self._handler = self._logger.handlers[0]
+        self._logger = _install(handler, level=level)
+        self._handler = handler
 
     @property
     def path(self) -> Path:

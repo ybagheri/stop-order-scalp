@@ -115,7 +115,7 @@ class TestValidation:
 
     def test_unknown_retry_key_is_an_error(self, tmp_path: Path) -> None:
         _write(tmp_path, "execution:\n  retry:\n    tries: 3\n")
-        with pytest.raises(ConfigError, match="unknown keys under 'execution.retry'"):
+        with pytest.raises(ConfigError, match=r"unknown keys under 'execution\.retry'"):
             _load(tmp_path)
 
     def test_missing_file_is_an_error_that_names_the_path(self, tmp_path: Path) -> None:
@@ -199,6 +199,40 @@ class TestValidation:
 
 
 class TestEnvironmentLayering:
+    def test_a_dot_env_in_the_working_directory_cannot_reach_a_test(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        # Regression. ``load_config(env_file=None)`` auto-discovers a ``.env`` in the cwd
+        # and merges it into os.environ, so a developer who has a real ``.env`` used to
+        # make the validation tests pass or fail depending on their machine. The helpers
+        # pass an explicit non-existent path, which is the documented way to have no
+        # environment layer at all.
+        hostile = tmp_path / "cwd"
+        hostile.mkdir()
+        (hostile / ".env").write_text("SOS_SYMBOL=US30\nSOS_RISK_PERCENT=99\n", encoding="utf-8")
+        monkeypatch.chdir(hostile)
+
+        _write(tmp_path, "risk:\n  percent: 0.75\n")
+        assert _load(tmp_path).strategy.risk.percent == Decimal("0.75")
+
+    def test_auto_discovery_still_finds_a_dot_env_in_the_working_directory(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        # The counterpart: the production behaviour is intentional and must not regress
+        # into "always ignore .env". Only the *tests* are insulated from it.
+        hostile = tmp_path / "cwd"
+        hostile.mkdir()
+        (hostile / ".env").write_text("SOS_RISK_PERCENT=1.25\n", encoding="utf-8")
+        monkeypatch.chdir(hostile)
+        _write(tmp_path, "risk:\n  percent: 0.75\n")
+
+        loaded = load_config(
+            config_path=tmp_path / "config" / "default.yaml",
+            env_file=None,
+            root=tmp_path,
+        )
+        assert loaded.strategy.risk.percent == Decimal("1.25")
+
     def test_a_real_environment_variable_beats_the_env_file(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
@@ -365,7 +399,18 @@ def _write(directory: Path, content: str) -> Path:
     return target
 
 
-def _load(directory: Path, *, env_file: Path | None = None) -> AppConfig:
+#: An ``.env`` path that deliberately does not exist.
+#:
+#: ``load_config(env_file=None)`` auto-discovers a ``.env`` in the *current working
+#: directory* and then merges it into ``os.environ`` with ``setdefault``. A test suite
+#: that relies on the default therefore reads the developer's real machine settings, and
+#: a validation test silently stops validating anything as soon as the developer has a
+#: ``.env``. Passing this path explicitly switches auto-discovery off, because a missing
+#: explicit ``.env`` is not an error -- it simply contributes no layer.
+NO_ENV_FILE = "this-file-deliberately-does-not-exist.env"
+
+
+def _load(directory: Path, *, env_file: Path | str | None = NO_ENV_FILE) -> AppConfig:
     config_path = directory / "config" / "default.yaml"
     if not config_path.is_file():
         _write(directory, "symbol: US30\n")
@@ -378,4 +423,6 @@ def config() -> AppConfig:
     from stop_order_scalp.infrastructure.config import find_project_root
 
     root = find_project_root()
-    return load_config(config_path=root / "config" / "default.yaml", root=root)
+    return load_config(
+        config_path=root / "config" / "default.yaml", env_file=NO_ENV_FILE, root=root
+    )

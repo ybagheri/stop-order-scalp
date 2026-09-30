@@ -60,11 +60,20 @@ LAYERS: tuple[str, ...] = (
 #: Layers whose business rules must stay free of MetaTrader 5 and of the broker.
 BROKER_FREE_LAYERS: frozenset[str] = frozenset({"domain", "strategy", "risk", "trailing", "lifecycle"})
 
-#: The only modules permitted to name ``MetaTrader5``.
-MT5_ALLOWED: frozenset[str] = frozenset({"market_data.mt5_feed", "execution.mt5_broker"})
+#: The only modules permitted to name ``MetaTrader5``. Fully qualified, because that is
+#: what :func:`module_name` returns; an unqualified spelling here silently never matches,
+#: which would make the rule reject the two permitted modules as well.
+MT5_ALLOWED: frozenset[str] = frozenset(
+    {
+        "stop_order_scalp.market_data.mt5_feed",
+        "stop_order_scalp.execution.mt5_broker",
+    }
+)
 
-#: The only module permitted to name ``albrooks``.
-AL_BROOKS_ALLOWED: frozenset[str] = frozenset({"integrations.al_brooks_adapter"})
+#: The only module permitted to name ``albrooks``. Fully qualified, as above.
+AL_BROOKS_ALLOWED: frozenset[str] = frozenset(
+    {"stop_order_scalp.integrations.al_brooks_adapter"}
+)
 
 #: Layer imports that are forbidden regardless of direction, because they would let
 #: business rules depend on infrastructure or on the application shell.
@@ -78,13 +87,21 @@ FORBIDDEN_LAYER_IMPORTS: dict[str, frozenset[str]] = {
 }
 
 #: Modules allowed to read the wall clock. Everything else must take a ``Clock``.
+#: These must be fully qualified: they are compared against :func:`module_name`.
 _CLOCK_ALLOWED: frozenset[str] = frozenset(
-    {"infrastructure.clock", "infrastructure.logging", "cli.main"}
+    {
+        "stop_order_scalp.infrastructure.clock",
+        "stop_order_scalp.infrastructure.logging",
+        "stop_order_scalp.cli.main",
+    }
 )
 
 _NAIVE_DATETIME = re.compile(r"\b(datetime|time)\s*\.\s*(now|utcnow)\s*\(")
 _DRIVE_PATH = re.compile(r"[A-Za-z]:\\\\|[A-Za-z]:/Users/|/home/[a-z]+/")
-_FLOAT_ANNOTATION = re.compile(r":\s*float\b")
+#: Matched against ``ast.unparse`` of an annotation, which renders ``float`` bare -- with
+#: no leading colon. A pattern requiring ": float" can never match and silently disables
+#: the rule, so this one deliberately has no colon.
+_FLOAT_ANNOTATION = re.compile(r"\bfloat\b")
 _MONEY_NAME = re.compile(r"(money|balance|equity|profit|commission|risk|price|volume|lots|pnl)", re.I)
 
 #: Test and script roots are not application source.
@@ -193,7 +210,7 @@ def _check_imports(
     path: Path, tree: ast.AST, module: str, layer: str | None, root: Path
 ) -> list[Violation]:
     violations: list[Violation] = []
-    for node, imported, line in imported_modules(tree):
+    for _node, imported, line in imported_modules(tree):
         if not imported:
             continue
 
@@ -217,16 +234,17 @@ def _check_imports(
                     )
                 )
 
-        if imported == "albrooks" or imported.startswith("albrooks."):
-            if module not in AL_BROOKS_ALLOWED:
-                violations.append(
-                    Violation(
-                        path,
-                        line,
-                        "albrooks-import",
-                        f"albrooks may only be imported by {sorted(AL_BROOKS_ALLOWED)}; found in {module}",
-                    )
+        if (
+            imported == "albrooks" or imported.startswith("albrooks.")
+        ) and module not in AL_BROOKS_ALLOWED:
+            violations.append(
+                Violation(
+                    path,
+                    line,
+                    "albrooks-import",
+                    f"albrooks may only be imported by {sorted(AL_BROOKS_ALLOWED)}; found in {module}",
                 )
+            )
 
         if layer is None or not imported.startswith(PACKAGE):
             continue
@@ -271,13 +289,20 @@ def _check_annotations(path: Path, tree: ast.AST) -> list[Violation]:
     """
     violations: list[Violation] = []
     for node in ast.walk(tree):
-        if not isinstance(node, ast.AnnAssign | ast.arg):
+        if not isinstance(node, (ast.AnnAssign, ast.arg)):
             continue
-        annotation = ast.unparse(node.annotation) if isinstance(node, ast.AnnAssign) else ast.unparse(node.annotation)
+        # An un-annotated parameter has ``annotation is None``; ast.unparse()
+        # cannot render that, so skip it before touching the attribute.
+        if node.annotation is None:
+            continue
+        annotation = ast.unparse(node.annotation)
         if not _FLOAT_ANNOTATION.search(annotation):
             continue
-        target = node.target if isinstance(node, ast.AnnAssign) else node.arg
-        name = target.id if isinstance(target, ast.Name) else ast.unparse(target)
+        if isinstance(node, ast.arg):
+            # ``ast.arg.arg`` is a plain str, not an AST node; it cannot be unparsed.
+            name = node.arg
+        else:
+            name = node.target.id if isinstance(node.target, ast.Name) else ast.unparse(node.target)
         if _MONEY_NAME.search(name) and not re.search(
             r"(fraction|ratio|ratio_|seconds|multiplier|delay|score|weight|slippage|rate|pnl_ratio)",
             name,
@@ -294,6 +319,19 @@ def _check_annotations(path: Path, tree: ast.AST) -> list[Violation]:
     return violations
 
 
+def _carries_timezone(node: ast.Call) -> bool:
+    """True when a ``datetime.now(...)``/``utcnow(...)`` call passes an explicit tz.
+
+    The rule this script enforces is *no naive datetime*, not *no datetime*. A call such
+    as ``datetime.now(UTC)`` is aware and therefore legal, so it must not be flagged.
+    ``utcnow()`` is always naive and never takes an argument, so any argument at all is
+    treated as evidence of awareness.
+    """
+    if any(keyword.arg in {"tz", "tzinfo"} for keyword in node.keywords):
+        return True
+    return bool(node.args)
+
+
 def check_clock_usage(path: Path, tree: ast.AST, module: str) -> list[Violation]:
     """Reject implicit wall-clock reads outside the modules allowed to have them."""
     if module in _CLOCK_ALLOWED:
@@ -302,7 +340,7 @@ def check_clock_usage(path: Path, tree: ast.AST, module: str) -> list[Violation]
     for node in ast.walk(tree):
         if isinstance(node, ast.Call):
             func = ast.unparse(node.func)
-            if _NAIVE_DATETIME.search(f"{func}("):
+            if _NAIVE_DATETIME.search(f"{func}(") and not _carries_timezone(node):
                 violations.append(
                     Violation(
                         path,
@@ -319,7 +357,20 @@ def check_clock_usage(path: Path, tree: ast.AST, module: str) -> list[Violation]
                             path,
                             node.lineno,
                             "wall-clock",
-                            f"importing 'time' directly; use stop_order_scalp.infrastructure.clock",
+                            "importing 'time' directly; use stop_order_scalp.infrastructure.clock",
+                        )
+                    )
+        elif isinstance(node, ast.Import):
+            # ``import time`` is the same dependency as ``from time import time``; checking
+            # only the ImportFrom form let the plain form through untouched.
+            for alias in node.names:
+                if alias.name == "time":
+                    violations.append(
+                        Violation(
+                            path,
+                            node.lineno,
+                            "wall-clock",
+                            "importing 'time' directly; use stop_order_scalp.infrastructure.clock",
                         )
                     )
     return violations

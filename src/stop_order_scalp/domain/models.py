@@ -335,8 +335,9 @@ class TradePlan:
     def __post_init__(self) -> None:
         strategy_id(self.plan_id)
         _require_offset_datetime(self.created_at, "created_at")
-        if self.volume <= 0:
-            raise ValueError("volume must be positive")
+        # Volume positivity is not re-checked here: Volume's own constructor already
+        # rejects a non-positive size, and a value object that can be built into an
+        # invalid state is not a value object.
 
     @property
     def symbol(self) -> str:
@@ -601,8 +602,10 @@ class RiskAssessment:
     total_risk: Money | None = None
     risk_fraction: Decimal | None = None
 
-    def reject(code: str, reason: str) -> Self:
-        return RiskAssessment(accepted=False, reason=reason, code=code)
+    @classmethod
+    def reject(cls, code: str, reason: str) -> Self:
+        """A rejection verdict. A rejection always carries a machine-readable ``code``."""
+        return cls(accepted=False, reason=reason, code=code)
 
     def __str__(self) -> str:
         verdict = "ACCEPT" if self.accepted else "REJECT"

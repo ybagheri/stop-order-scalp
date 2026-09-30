@@ -13,6 +13,7 @@ ENV/
 .mypy_cache/
 .pytest_cache/
 .ruff_cache/
+.hypothesis/
 .coverage
 htmlcov/
 coverage.xml

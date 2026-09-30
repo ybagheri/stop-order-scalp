@@ -52,7 +52,7 @@ risk:
   mode: percent_balance
   percent: 0.5
   fixed_lot: 0.10
-  # Estimated commission. See docs/risk/RISK_MODEL.md for what round-trip means.
+  # Estimated commission. See docs/risk/README.md for what round-trip means.
   commission_per_lot: 6.0
   # per_lot_round_trip -- commission_per_lot covers opening AND closing (BASELINE)
   # per_lot_per_side   -- commission_per_lot covers one side; doubled internally
@@ -152,7 +152,7 @@ integrations:
 
 filters:
   # All filters are optional and disabled by default. Baseline behaviour is unchanged
-  # with every one of them off. See docs/research/FILTERS.md.
+  # with every one of them off. See docs/research/README.md.
   max_spread_points: 0
   min_atr_points: 0
   max_atr_points: 0

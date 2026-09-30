@@ -14,6 +14,7 @@ Code  Meaning
 1     The operation ran and failed (broker refused, order rejected, assertion failed).
 2     Refused before doing anything (bad configuration, safety gate, wrong environment).
 3     Not connected to MetaTrader 5.
+4     The command exists in the contract but the phase implementing it is not built yet.
 ===== =========================================================================
 
 Every subcommand prints JSON to stdout so that output is machine-readable. Human-facing
@@ -26,19 +27,62 @@ import argparse
 import json
 import sys
 from collections.abc import Sequence
+from importlib import import_module
 from pathlib import Path
-from typing import Any, Final, TextIO
+from typing import Any, Final, Protocol, TextIO
 
-from stop_order_scalp.domain.exceptions import ConfigError, StopOrderScalpError
+from stop_order_scalp.domain.exceptions import (
+    ComponentNotAvailableError,
+    ConfigError,
+    StopOrderScalpError,
+)
 from stop_order_scalp.domain.version import __version__
 from stop_order_scalp.infrastructure.config import AppConfig, load_config
 
-__all__ = ["EXIT_CONFIG", "EXIT_FAILURE", "EXIT_NOT_CONNECTED", "EXIT_OK", "build_parser", "main"]
+__all__ = [
+    "EXIT_CONFIG",
+    "EXIT_FAILURE",
+    "EXIT_NOT_CONNECTED",
+    "EXIT_OK",
+    "EXIT_UNAVAILABLE",
+    "Handler",
+    "build_parser",
+    "main",
+]
 
 EXIT_OK: Final[int] = 0
 EXIT_FAILURE: Final[int] = 1
 EXIT_CONFIG: Final[int] = 2
 EXIT_NOT_CONNECTED: Final[int] = 3
+EXIT_UNAVAILABLE: Final[int] = 4
+
+
+class Handler(Protocol):
+    """The uniform shape every subcommand implements."""
+
+    def __call__(
+        self, args: argparse.Namespace, config: AppConfig, out: TextIO, err: TextIO
+    ) -> int: ...
+
+
+def _resolve(module: str, attribute: str) -> Any:
+    """Import a component that a later phase owns, by name.
+
+    Resolution is deliberately dynamic. The CLI contract is fixed in Phase 1 while the
+    market-data, execution, lifecycle, persistence and backtest components behind most
+    subcommands are built in Phases 2, 5, 7, 9 and 10. A static ``from ... import ...``
+    would make the type checker demand modules that do not exist yet, and a bare
+    ``import_module`` call would raise a bare ``ImportError`` traceback at run time. Going
+    through this helper gives both: mypy sees a plain ``Any``, and the operator sees a
+    named failure with a defined exit code.
+    """
+    try:
+        return getattr(import_module(module), attribute)
+    except (ImportError, AttributeError) as exc:
+        raise ComponentNotAvailableError(
+            f"{module}.{attribute} is not implemented yet; "
+            f"'{_PROGRAM}' is at a phase where that command does not exist"
+        ) from exc
 
 _PROGRAM: Final[str] = "stop_order-scalp"
 
@@ -123,17 +167,20 @@ def main(argv: Sequence[str] | None = None, *, stdout: TextIO | None = None, std
         _fail(err, EXIT_CONFIG, f"configuration error: {exc}")
         return EXIT_CONFIG
 
-    try:
-        handler = _HANDLERS[args.command]
-    except KeyError:  # pragma: no cover - argparse rejects unknown commands first
-        parser.error(f"unknown command {args.command}")
-        return EXIT_CONFIG
+    # ``required=True`` on the subparsers means argparse has already rejected any command
+    # that is not registered, so every command reaching this line has a handler. A
+    # KeyError here is therefore a wiring bug in this module, not an operator mistake,
+    # and must not be swallowed into a polite exit code.
+    handler = _HANDLERS[args.command]
 
     try:
         return handler(args, config, out, err)
     except ConfigError as exc:
         _fail(err, EXIT_CONFIG, f"configuration error: {exc}")
         return EXIT_CONFIG
+    except ComponentNotAvailableError as exc:
+        _fail(err, EXIT_UNAVAILABLE, str(exc))
+        return EXIT_UNAVAILABLE
     except StopOrderScalpError as exc:
         _fail(err, EXIT_FAILURE, f"{type(exc).__name__}: {exc}")
         return EXIT_FAILURE
@@ -170,7 +217,7 @@ def _cmd_validate_config(
 
 
 def _cmd_status(args: argparse.Namespace, config: AppConfig, out: TextIO, err: TextIO) -> int:
-    from stop_order_scalp.application.status import collect_status
+    collect_status = _resolve("stop_order_scalp.application.status", "collect_status")
 
     report = collect_status(config)
     _emit(out, report)
@@ -178,7 +225,7 @@ def _cmd_status(args: argparse.Namespace, config: AppConfig, out: TextIO, err: T
 
 
 def _cmd_test_connection(args: argparse.Namespace, config: AppConfig, out: TextIO, err: TextIO) -> int:
-    from stop_order_scalp.execution.mt5_broker import probe_connection
+    probe_connection = _resolve("stop_order_scalp.execution.mt5_broker", "probe_connection")
 
     report = probe_connection(config)
     _emit(out, report)
@@ -186,7 +233,7 @@ def _cmd_test_connection(args: argparse.Namespace, config: AppConfig, out: TextI
 
 
 def _cmd_run(args: argparse.Namespace, config: AppConfig, out: TextIO, err: TextIO) -> int:
-    from stop_order_scalp.application.service import TradingService, build_service
+    build_service = _resolve("stop_order_scalp.application.service", "build_service")
 
     service = build_service(config, dry_run=args.dry_run, paper=args.paper, live=args.live)
     cycles = service.run(max_cycles=args.max_cycles, interval=args.interval)
@@ -195,23 +242,23 @@ def _cmd_run(args: argparse.Namespace, config: AppConfig, out: TextIO, err: Text
 
 
 def _cmd_journal(args: argparse.Namespace, config: AppConfig, out: TextIO, err: TextIO) -> int:
-    from stop_order_scalp.infrastructure.persistence import JsonStateLedger
+    ledger_type = _resolve("stop_order_scalp.infrastructure.persistence", "JsonStateLedger")
 
-    with JsonStateLedger(config.paths.state_file) as ledger:
+    with ledger_type(config.paths.state_file) as ledger:
         entries = ledger.journal(limit=config.state.journal_limit)
         _emit(out, {"count": len(entries), "entries": entries})
     return EXIT_OK
 
 
 def _cmd_diagnostics(args: argparse.Namespace, config: AppConfig, out: TextIO, err: TextIO) -> int:
-    from stop_order_scalp.application.diagnostics import build_diagnostics
+    build_diagnostics = _resolve("stop_order_scalp.application.diagnostics", "build_diagnostics")
 
     _emit(out, build_diagnostics(config))
     return EXIT_OK
 
 
 def _cmd_backtest(args: argparse.Namespace, config: AppConfig, out: TextIO, err: TextIO) -> int:
-    from stop_order_scalp.backtest.runner import run_backtest_from_args
+    run_backtest_from_args = _resolve("stop_order_scalp.backtest.runner", "run_backtest_from_args")
 
     report = run_backtest_from_args(args, config)
     if args.output is not None:
@@ -221,7 +268,7 @@ def _cmd_backtest(args: argparse.Namespace, config: AppConfig, out: TextIO, err:
     return EXIT_OK
 
 
-_HANDLERS: Final[dict[str, Any]] = {
+_HANDLERS: Final[dict[str, Handler]] = {
     "run": _cmd_run,
     "status": _cmd_status,
     "validate-config": _cmd_validate_config,
@@ -243,5 +290,5 @@ def _emit(stream: TextIO, payload: dict[str, Any]) -> None:
 
 
 def _fail(stream: TextIO, code: int, message: str) -> None:
-    stream.write(f"ERROR: {message}\n")
+    stream.write(f"ERROR [{code}]: {message}\n")
     stream.flush()

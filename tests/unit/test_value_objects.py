@@ -9,6 +9,7 @@ fixture.
 from __future__ import annotations
 
 from decimal import ROUND_CEILING, ROUND_FLOOR, Decimal
+from typing import Any
 
 import pytest
 from hypothesis import given
@@ -40,7 +41,10 @@ class TestPrice:
         # silently promoted back to a Price with the wrong digits.
         result = Price.parse("40000.0", 1) + Decimal("10.0")
         assert isinstance(result, Decimal)
-        assert not isinstance(result, Price)
+        # Price and Decimal are disjoint classes, so the type checker already knows this
+        # comparison is False. The assertion pins the runtime behaviour, which is the
+        # actual regression this test exists to catch.
+        assert not isinstance(result, Price)  # type: ignore[unreachable]
 
     def test_distance_is_unsigned(self) -> None:
         a = Price.parse("40000.0")
@@ -60,7 +64,7 @@ class TestPrice:
 
     def test_comparison_refuses_a_price(self) -> None:
         with pytest.raises(DomainError):
-            Price.parse("1.0") < "1.0"  # type: ignore[operator]
+            _ = Price.parse("1.0") < "1.0"  # type: ignore[operator]
 
 
 class TestMoney:
@@ -302,8 +306,13 @@ class TestPriceProperties:
         assert spec.is_volume_on_step(normalized.lots)
 
 
-def _fields(spec: SymbolSpecification) -> dict[str, object]:
-    """Keyword arguments for rebuilding ``spec`` with overrides."""
+def _fields(spec: SymbolSpecification) -> dict[str, Any]:
+    """Keyword arguments for rebuilding ``spec`` with overrides.
+
+    ``Any`` rather than ``object``: the result is splatted straight back into
+    ``SymbolSpecification(**...)`` with one field overridden, and ``object`` would make
+    every splatted value un-typeable at the call site.
+    """
     return {
         "name": spec.name,
         "digits": spec.digits,

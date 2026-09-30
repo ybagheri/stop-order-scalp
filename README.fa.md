@@ -7,13 +7,19 @@
 > **وضعیت: در حال توسعه.** برای دیدن وضعیت فعلی به [`ROADMAP.md`](ROADMAP.md) و
 > [`HANDOFF.md`](HANDOFF.md) مراجعه کنید.
 >
+> **فاز ۱ (پایه‌گذاری پروژه) کامل شده است.** لایه دامنه، پیکربندی، لاگ، ساعت، تایم‌فریم‌ها و
+> دروازه معماری پیاده‌سازی و تست شده‌اند — ۲۷۴ تست، بدون نیاز به بروکر. از هفت فرمان خط
+> فرمان، **فقط `validate-config` کار می‌کند**؛ شش فرمان دیگر با کد **۴** خارج می‌شوند و
+> اعلام می‌کنند کدام فاز هنوز ساخته نشده است. سطح فرمان‌ها عمداً پیش از پیاده‌سازی‌هایش
+> تثبیت شده تا قرارداد همین حالا قابل تست باشد.
+>
 > **هیچ ادعایی درباره سودآوری وجود ندارد.** سودآوری تا زمانی که آزمون آماری معنادار
 > انجام نشود، قابل اعلام نیست.
 >
 > **هشدار ریسک.** معاملات خودکار ریسک زیان قابل توجهی دارد. ابتدا در حالت
-> `DRY_RUN` و سپس `PAPER` و در نهایت روی حساب دمو آزمایش کنید. هرگز بدون خواندن
-> [`docs/operations/LIVE_DEPLOYMENT.md`](docs/operations/LIVE_DEPLOYMENT.md) روی حساب
-> واقعی اجرا نکنید.
+> `DRY_RUN` و سپس `PAPER` و در نهایت روی حساب دمو آزمایش کنید. حالت `LIVE` هنوز
+> پیاده‌سازی نشده و سه بار قفل شده است؛ پیش از نزدیک شدن به آن
+> [`docs/operations/`](docs/operations/) را بخوانید.
 
 ---
 
@@ -80,6 +86,31 @@ python -m stop_order_scalp diagnostics        # بسته محیط و پیکرب�
 هر عملیات تغییردهنده حساب **کلید فعال‌سازی مستقل** خودش را دارد و `LIVE` علاوه بر آن
 به `SOS_ALLOW_LIVE=true` نیاز دارد. هیچ مسیری به‌طور تصادفی به معاملات واقعی نمی‌رسد.
 
+### کدهای خروج
+
+بخشی از قرارداد هستند، چون یک فرایند ناظر به آن‌ها وابسته است.
+
+| کد | معنی |
+| --- | --- |
+| 0 | موفقیت |
+| 1 | اجرا شد و شکست خورد (رد بروکر، رد سفارش) |
+| 2 | پیش از هر کاری رد شد (پیکربندی نامعتبر، دروازه ایمنی) |
+| 3 | به متاتریدر ۵ متصل نیست |
+| 4 | فرمان وجود دارد، ولی فاز پیاده‌سازی آن هنوز ساخته نشده |
+
+## توسعه
+
+```bash
+python -m pytest                             # ۲۷۴ تست
+python -m ruff check .                       # لینت
+python -m mypy                               # نوع‌ها، حالت strict، src و tests
+python scripts/check_architecture.py         # مرزهای معماری
+```
+
+دستور `pytest` هر چهار دروازه را پوشش می‌دهد، اما هنگام کار آن‌ها را جداگانه اجرا کنید تا
+خروجی خوانا باشد. [`docs/testing/`](docs/testing/) و [`CONTRIBUTING.md`](CONTRIBUTING.md)
+را ببینید.
+
 ## پیکربندی
 
 پارامترهای استراتژی: [`config/default.yaml`](config/default.yaml).
@@ -88,35 +119,40 @@ python -m stop_order_scalp diagnostics        # بسته محیط و پیکرب�
 
 ```yaml
 symbol: US30
+symbol_aliases: [US30, US30.cash, US30m, DJ30]   # تطبیق دقیق و بدون حساسیت به بزرگی/کوچکی حروف
 
 entry:
   timeframe: M1
   direction_timeframe: M15
-  offset_points: 10
-  use_forming_candles: false          # false = فقط آخرین کندل بسته‌شده (بدون نگاه به آینده)
+  offset_points: 10                            # BUY STOP = high+10, SELL STOP = low-10
+  candle_selection: last_closed                # هرگز کندل در حال تشکیل: بدون نگاه به آینده
 
 risk:
-  mode: percent_balance               # یا: fixed_lot
+  mode: percent_balance                         # یا: fixed_lot
   percent: 0.5
   fixed_lot: 0.10
   commission_per_lot: 6.0
   commission_mode: per_lot_round_trip
 
 target:
-  mode: fixed_points                  # یا: risk_reward
+  mode: fixed_points                            # یا: risk_reward
   take_profit_points: 1000
   risk_reward: 1.0
-  stop_loss_points: 100
+  stop_loss_points: 100                         # فاصله از ورود، وقتی حالتی به SL نیاز دارد
 
 break_even:
   enabled: true
   trigger_points: 50
-  include_commission: false
+  mode: entry                                   # یا: commission_aware
 
 trailing:
   enabled: true
   distance_points: 100
+  min_step_points: 1                            # هر تیک درخواست تغییر نفرست
 ```
+
+کلید ناشناخته در هر بخشی از این فایل یک **خطای قطعی همراه با نام بخش** است، نه یک هشدار.
+غلط املایی در پارامتر ریسک که بی‌صدا نادیده گرفته شود، گران‌ترین نوع باگ پیکربندی است.
 
 ## معماری
 

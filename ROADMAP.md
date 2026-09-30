@@ -26,7 +26,7 @@ Quality gate: **met** — document committed and pushed.
 
 ---
 
-## Phase 1 — Project Foundation — `pending`
+## Phase 1 — Project Foundation — `complete`
 
 Implement:
 
@@ -46,21 +46,75 @@ Implement:
 * `scripts/check_architecture.py` — architecture boundary enforcement
 * Documentation: `docs/architecture/ARCHITECTURE.md`
 
-Gate: tests pass, `ruff` clean, `mypy` clean, docs updated, commit, push.
+Delivered:
+
+* `domain/` — enums (14), exceptions (22), `Price` / `Money` / `Volume` /
+  `SymbolSpecification`, domain models, and the four outward protocols
+* `infrastructure/` — three-layer config with unknown-key rejection and secret reduction,
+  JSONL rotating audit log, injectable clock
+* `market_data/timeframes.py` — period seconds and boundary math
+* `cli/main.py` — the full command surface and exit-code contract. Only `validate-config`
+  is implemented; the other six exit **4** by name until their phase lands
+* `docs/architecture/ARCHITECTURE.md`, `docs/strategy/BASELINE.md`, and placeholder
+  `README.md` in `docs/{risk,mt5,testing,operations,research}/`
+
+Quality gate: **met** — 274 tests pass, `ruff` clean, `mypy --strict` clean over
+`src` and `tests`, `scripts/check_architecture.py` reports 26 modules and no violations.
+
+### Defects found and fixed during Phase 1 stabilisation
+
+The first Phase 1 commit did not satisfy its own gate. Fixing it surfaced real bugs, not
+just lint noise:
+
+| Defect | Consequence |
+| --- | --- |
+| `config.__all__` exported a non-existent `PathSettings` | `import *` from the module raised `AttributeError` |
+| `LifecycleState.is_recoverable` called an undefined `is_terminal` | `AttributeError` on every call |
+| `SymbolSpecification.price_risk_for` called `.lots` on a bare `Decimal` | `AttributeError` for any non-`Volume` argument |
+| `RiskAssessment.reject` declared no `self` | `code` bound to `self`; the classmethod-style call failed |
+| `AuditLogger.file_path` read `baseFilename` off the `Handler` base class | `AttributeError`; the attribute is on `FileHandler` |
+| `TradePlan.__post_init__` compared a `Volume` to `0` | `TypeError`; and the check was unreachable anyway |
+| `Broker(Protocol, AccountReader, …)` — `Protocol` listed first | inconsistent MRO; `domain/interfaces.py` could not be **imported at all**, and nothing tested it |
+| `check_architecture.py` crashed on un-annotated parameters | the whole gate failed to run |
+| `check_architecture.py` crashed on `ast.arg.arg` (a `str`, not a node) | ditto |
+| `_CLOCK_ALLOWED` held unqualified module names | no module was ever exempt; `datetime.now(UTC)` was flagged |
+| `MT5_ALLOWED` / `AL_BROOKS_ALLOWED` held unqualified module names | rules 1 and 2 rejected the two permitted modules and permitted nothing |
+| `_FLOAT_ANNOTATION` required a leading colon `ast.unparse` never emits | rule 4 could never match; entirely inert |
+| the `time` rule only matched `from time import …`, not `import time` | rule 6 had a hole |
+| 11 `__init__.py` files carried a UTF-8 BOM | `check_architecture.py` could not parse them |
+| `cli/main.py` statically imported six modules from Phases 5–10 | `mypy` failed; a traceback at run time |
+
+Two further findings were test defects rather than code defects, and both are now pinned by
+regression tests:
+
+* `load_config(env_file=None)` auto-discovers a `.env` in the **working directory**, so the
+  config tests read the developer's real machine settings and silently stopped validating
+  anything once a `.env` existed. The helpers now pass an explicit non-existent path.
+* The architecture gate had never been tested. `tests/unit/test_architecture.py` now feeds
+  deliberately broken source through it, which is how the four inert rules above were
+  found. `tests/unit/test_interfaces.py` adds the same treatment for the package surface:
+  every module must import, and every `__all__` entry must resolve.
 
 ---
 
 ## Phase 2 — Market Data — `pending`
 
+Start here: `market_data/timeframes.py` and the point/price helpers in
+`domain/value_objects/price.py` are already implemented in Phase 1, and `Candle` already
+lives in `domain/models.py` with `is_closed_at()` and `close_time_is_floor()`. Phase 2
+builds the MT5 feed on top of them rather than re-implementing them.
+
 Implement:
 
 * `market_data/timeframes.py`: `M1`…`MN1` with period seconds and boundary math
+  — **done in Phase 1**
 * `market_data/mt5_module.py`: lazy `import MetaTrader5`, typed protocol for the slice used
 * `market_data/mt5_feed.py`: connect, symbol select, ticks, candles, closed-candle freeze
 * `domain/value_objects/price.py`: `points_to_price`, `price_to_points`, `normalize_price`,
-  `normalize_volume` — all broker-spec driven
+  `normalize_volume` — all broker-spec driven — **done in Phase 1**
 * `market_data/candles.py`: `Candle` domain object, `closed_only()` filter with an
-  explicit freeze report, tz-aware timestamps
+  explicit freeze report, tz-aware timestamps — `Candle` is in `domain/models.py`; the
+  `closed_only()` freeze filter is not
 * Broker server-time vs UTC vs local-time handling, documented
 * `docs/mt5/SETUP.md`, `docs/mt5/SYMBOL_SPECIFICATIONS.md`
 
