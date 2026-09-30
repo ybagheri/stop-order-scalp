@@ -1,0 +1,29 @@
+Copyright (c) 2026 Yaser Bagheri. All rights reserved.
+
+This software and its source code are proprietary and confidential. No part of this
+software may be used, copied, modified, merged, published, distributed, sublicensed, or
+sold without the prior written permission of the copyright holder.
+
+Permission to use this software is granted solely for the licensed account holder, for
+the sole purpose of automated trading research and operation on accounts they are
+authorised to trade.
+
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR IMPLIED,
+INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY, FITNESS FOR A PARTICULAR
+PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE COPYRIGHT HOLDER BE LIABLE FOR ANY
+CLAIM, DAMAGES OR OTHER LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE,
+ARISING FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN
+THE SOFTWARE.
+
+Third-party components retain their own licences:
+
+* MetaTrader 5 Python API (`MetaTrader5`) — broker-supplied redistribution terms apply.
+  It is an optional dependency and is not vendored into this repository.
+* Al Brooks Price Action Engine (`albrooks`) — MIT, Copyright (c) 2026 Yaser Bagheri.
+  Used as an optional integration.
+
+Trading disclaimer: this software is provided for research and educational purposes
+only. It is not financial, investment, or trading advice. Trading leveraged instruments
+carries a substantial risk of loss and can result in the loss of more than the account
+deposit. The operator is solely responsible for every order placed with their account
+credentials.

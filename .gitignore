@@ -1,0 +1,36 @@
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+build/
+dist/
+.eggs/
+*.egg-info/
+.venv/
+venv/
+ENV/
+.tox/
+.mypy_cache/
+.pytest_cache/
+.ruff_cache/
+.coverage
+htmlcov/
+coverage.xml
+
+# --- runtime state (root-anchored on purpose) ---
+#
+# These must stay anchored. An unanchored "logs/" or "state/" would also match
+# package directories and silently drop source code out of git.
+/.env
+/logs/
+/state/
+/reports/
+/data/
+
+# --- editors / OS ---
+.idea/
+.vscode/
+*.swp
+Thumbs.db
+desktop.ini
+.DS_Store

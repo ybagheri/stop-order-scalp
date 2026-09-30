@@ -1,0 +1,168 @@
+# Stop Order Scalp
+
+[نسخه فارسی](README.fa.md)
+
+**US30 stop-order scalping system — M15 direction filter, M1 stop entries, MT5 execution.**
+
+> **Status: under active development.** See [`ROADMAP.md`](ROADMAP.md) for what exists
+> today and [`HANDOFF.md`](HANDOFF.md) for the state of the last completed phase.
+>
+> **No profitability is claimed.** See [`docs/strategy/BASELINE.md`](docs/strategy/BASELINE.md).
+>
+> **Risk warning.** Automated trading carries substantial risk of loss. Start in
+> `DRY_RUN`, then `PAPER`, then a demo account. Never run this on a live account without
+> reading [`docs/operations/LIVE_DEPLOYMENT.md`](docs/operations/LIVE_DEPLOYMENT.md).
+
+---
+
+## Purpose
+
+A modular, testable, object-oriented trading application that implements exactly one
+strategy on one instrument:
+
+* Trade **US30 only**.
+* The **15-minute candle** decides the allowed direction.
+* A **1-minute candle's high/low** places a **pending stop order**, 10 points beyond it.
+* Size positions from **0.5 % of account balance**, commission-aware.
+* **Break-even** at a configurable trigger, then a **100-point trailing stop** that never
+  moves backwards.
+* **Immediately** place the next pending order when a position closes.
+
+Everything about the strategy lives in configuration. Nothing about MetaTrader 5 leaks
+into the strategy, risk, or lifecycle code.
+
+## Documentation map
+
+| Document | Purpose |
+| --- | --- |
+| [`ROADMAP.md`](ROADMAP.md) | Phased plan and per-phase status |
+| [`HANDOFF.md`](HANDOFF.md) | Mandatory state file — read this first |
+| [`CHANGELOG.md`](CHANGELOG.md) | Release-style change log |
+| [`docs/architecture/`](docs/architecture/) | Architecture, decisions, audit |
+| [`docs/strategy/BASELINE.md`](docs/strategy/BASELINE.md) | The exact strategy rules |
+| [`docs/risk/`](docs/risk/) | Sizing, commission, SL/TP semantics |
+| [`docs/mt5/`](docs/mt5/) | MT5 setup, symbol specifications, dry-run |
+| [`docs/testing/`](docs/testing/) | Test layout, property tests, how to run |
+| [`docs/operations/`](docs/operations/) | Deployment, troubleshooting, recovery |
+| [`docs/research/`](docs/research/) | Optional, disabled-by-default research layer |
+
+## Quick start
+
+```bash
+git clone git@github.com:ybagheri/stop-order-scalp.git
+cd stop-order-scalp
+python -m venv .venv
+# Windows: .venv\Scripts\activate   |   Linux/macOS: source .venv/bin/activate
+pip install -e ".[dev]"
+cp .env.example .env        # Windows: copy .env.example .env
+python -m stop_order_scalp validate-config
+python -m stop_order_scalp test-connection
+python -m stop_order_scalp run --dry-run
+```
+
+## CLI
+
+```bash
+python -m stop_order_scalp run                # live trading (refuses unless explicitly enabled)
+python -m stop_order_scalp run --dry-run      # full pipeline, zero broker writes
+python -m stop_order_scalp status             # connection, account, symbol, state, risk
+python -m stop_order_scalp validate-config    # validate config/default.yaml + .env
+python -m stop_order_scalp backtest --help    # historical replay
+python -m stop_order_scalp test-connection    # MT5 reachability, read-only
+python -m stop_order_scalp journal            # trade journal
+python -m stop_order_scalp diagnostics        # environment + config bundle
+```
+
+Execution modes (`SOS_ENVIRONMENT`): `DRY_RUN` (default) → `PAPER` → `DEMO` → `LIVE`.
+Each account-changing operation has its **own** opt-in switch, and `LIVE` additionally
+requires `SOS_ALLOW_LIVE=true`. There is no path that reaches live trading by accident.
+
+## Configuration
+
+Strategy parameters: [`config/default.yaml`](config/default.yaml).
+Machine-specific values (MT5 path, login, server, magic number, mode): `.env`
+(see [`.env.example`](.env.example)).
+
+```yaml
+symbol: US30
+
+entry:
+  timeframe: M1
+  direction_timeframe: M15
+  offset_points: 10
+  use_forming_candles: false          # false = last CLOSED candle only (no look-ahead)
+
+risk:
+  mode: percent_balance               # or: fixed_lot
+  percent: 0.5
+  fixed_lot: 0.10
+  commission_per_lot: 6.0
+  commission_mode: per_lot_round_trip
+
+target:
+  mode: fixed_points                  # or: risk_reward
+  take_profit_points: 1000
+  risk_reward: 1.0
+  stop_loss_points: 100               # distance from entry when mode needs an SL
+
+break_even:
+  enabled: true
+  trigger_points: 50
+  include_commission: false
+
+trailing:
+  enabled: true
+  distance_points: 100
+```
+
+## Architecture
+
+```
+CLI  →  Application (TradingService)  →  Orchestrator
+                                        │
+              ┌─────────────────────────┼─────────────────────────┐
+              ▼                         ▼                         ▼
+         Strategy                  Risk Engine              Lifecycle
+   (M15 direction, M1          (sizing, commission,      (state machine,
+    stop-entry rules)            SL/TP, validation)       replacement)
+              │                         │                         │
+              └─────────────────────────┴─────────────────────────┘
+                                        ▼
+                          Execution  ──►  Broker (Protocol)
+                                        │
+                     ┌──────────────────┴──────────────────┐
+                     ▼                                     ▼
+              MetaTrader5Broker                    SimulatedBroker
+                (native API)                        (dry-run / paper / backtest)
+```
+
+* The **domain** is free of MetaTrader 5, free of floats for money, and free of I/O.
+* `strategy`, `risk`, `trailing` and `lifecycle` never import `MetaTrader5`.
+  `scripts/check_architecture.py` enforces this in CI.
+* `simulated_broker` is a first-class implementation, not a test double — it is what
+  `DRY_RUN` and the backtester run on.
+
+See [`docs/architecture/ARCHITECTURE.md`](docs/architecture/ARCHITECTURE.md).
+
+## Contributing
+
+See [`CONTRIBUTING.md`](CONTRIBUTING.md). Every phase must end with: tests passing,
+documentation updated, `ROADMAP.md` / `HANDOFF.md` / `CHANGELOG.md` refreshed, git
+working tree clean, commit created, push succeeded.
+
+## Security
+
+* No credentials in git. `.env` is git-ignored and root-anchored.
+* The audit/journal logs are structural: no secret field exists on the log record model,
+  so a token cannot be logged by mistake.
+* `LIVE` requires two independent opt-ins plus a demo-only interlock.
+
+## License
+
+Proprietary. See [`LICENSE`](LICENSE).
+
+## Disclaimer
+
+Provided for **research and educational purposes only**. It is not financial,
+investment, or trading advice. Trading leveraged instruments can lose you more than your
+deposit.
