@@ -1,0 +1,1 @@
+"""Cross-component integration tests. Still hermetic: no terminal, no network."""

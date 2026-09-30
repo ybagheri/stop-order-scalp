@@ -1,0 +1,163 @@
+# =============================================================================
+# stop-order-scalp -- strategy defaults
+#
+# This file holds STRATEGY parameters only. It must never contain a credential, a
+# login, a terminal path or anything else machine-specific. Those belong in `.env`,
+# which is git-ignored.
+#
+# Precedence, lowest to highest:
+#   1. this file
+#   2. .env  (machine-local)
+#   3. real environment variables (SOS_*) -- a real env var always beats .env
+#
+# Every key here is validated at load. An unknown key is an error, not a warning: a
+# typo in a risk parameter that is silently ignored is the most expensive kind of
+# configuration bug there is.
+# =============================================================================
+
+symbol: US30
+# Broker symbol names accepted for the logical instrument above. Different brokers
+# expose US30, US30.cash, US30m, DJ30. Matching is exact, case-insensitive. Listing a
+# name here is an explicit decision to trade it -- there is no fuzzy or substring match,
+# so US30mini or EURUSD30 can never be traded by accident.
+symbol_aliases:
+  - US30
+  - US30.cash
+  - US30m
+  - DJ30
+# Observed but not approved. Reported by `status`, never traded automatically.
+symbol_quarantine: []
+
+entry:
+  # The 1-minute candle whose high/low place the pending stop order.
+  timeframe: M1
+  # The 15-minute candle that decides the allowed direction.
+  direction_timeframe: M15
+  # BUY STOP  = M1.high + offset_points
+  # SELL STOP = M1.low  - offset_points
+  offset_points: 10
+  # Which candle is used.
+  #   last_closed    -- the most recent fully closed candle. No look-ahead. BASELINE.
+  #   current_forming -- the in-progress candle. Repaints. Research only.
+  candle_selection: last_closed
+  # How many candles of each timeframe to request.
+  lookback: 5
+  # Drop a pending order after this many M1 candles without a fill. null = never expire.
+  # Baseline is null: the specification says a stale order is re-evaluated, not aged out.
+  expiry_candles: null
+
+risk:
+  # percent_balance -- size from a percentage of account balance (BASELINE)
+  # fixed_lot       -- always trade a fixed lot size
+  mode: percent_balance
+  percent: 0.5
+  fixed_lot: 0.10
+  # Estimated commission. See docs/risk/RISK_MODEL.md for what round-trip means.
+  commission_per_lot: 6.0
+  # per_lot_round_trip -- commission_per_lot covers opening AND closing (BASELINE)
+  # per_lot_per_side   -- commission_per_lot covers one side; doubled internally
+  commission_mode: per_lot_round_trip
+  # Refuse to trade when the computed volume is below the broker minimum, rather than
+  # silently rounding up to it. Up-rounding would exceed the risk budget.
+  refuse_below_min_volume: true
+  # Ceiling on total risk as a fraction of balance, independent of `percent`. A
+  # second, independent brake. Set to 1.0 to disable.
+  max_total_risk_fraction: 1.0
+
+target:
+  # fixed_points    -- take_profit_points from entry (BASELINE)
+  # risk_reward     -- take_profit derived from risk_reward and the stop
+  # signal_defined  -- use the take profit a signal supplies, else fall back to fixed_points
+  mode: fixed_points
+  take_profit_points: 1000
+  # Used when mode is risk_reward. 1.0 means 1:1.
+  risk_reward: 1.0
+  # Stop distance in points, used when the stop has to be derived rather than supplied.
+  # Only consulted by risk_reward mode and by commission-aware break-even sizing.
+  stop_loss_points: 100
+
+stop_loss:
+  # fixed_points  -- stop_loss_points from entry (BASELINE)
+  # risk_reward   -- no separate stop; the stop defines the risk and the ratio the target
+  # signal_defined -- use the stop a signal supplies, else fall back to fixed_points
+  mode: fixed_points
+
+break_even:
+  enabled: true
+  # Favourable move, in points, before the stop is moved to entry. Zero would move the
+  # stop the instant the position opens, which is not the strategy.
+  trigger_points: 50
+  # entry            -- stop moves exactly to the entry price
+  # commission_aware -- stop moves far enough to cover estimated commission
+  mode: entry
+  # Applied when mode is commission_aware.
+  commission_points: 0
+
+trailing:
+  enabled: true
+  # BUY:  new SL = bid - distance_points
+  # SELL: new SL = ask + distance_points
+  # Always monotonic: a BUY stop only rises, a SELL stop only falls.
+  distance_points: 100
+  # Do not start trailing until the position has moved this many points in favour.
+  # 0 means start as soon as break-even has been applied.
+  arm_after_points: 0
+  # Minimum price movement, in points, before a new trailing stop is worth sending.
+  # Prevents a modify request on every single tick.
+  min_step_points: 1
+
+order:
+  # Seconds a pending order may live on the book. null = GTC.
+  lifetime_seconds: null
+  # Maximum deviation from the requested price, in points.
+  deviation_points: 20
+  # Fill policy applied when the broker supports it.
+  filling_policy: FOK
+  # Expire the pending order if the stop or target is closer to entry than this many
+  # points -- a guard against a spread that makes the trade meaningless. 0 disables.
+  min_stop_points: 0
+
+execution:
+  magic_number: 20260930
+  # Seconds between decision cycles.
+  poll_interval_seconds: 1.0
+  # Bounded exponential backoff for *safe* reads only. An order send whose outcome is
+  # unknown is never retried -- it is re-observed.
+  retry:
+    max_attempts: 5
+    base_delay_seconds: 0.5
+    max_delay_seconds: 30.0
+    multiplier: 2.0
+
+logging:
+  level: INFO
+  directory: logs
+
+state:
+  # Where the idempotency ledger and the lifecycle snapshot live. Relative to the
+  # project root. Contains no secrets.
+  path: state/state.json
+  # Keep this many closed trades in the journal.
+  journal_limit: 500
+
+integrations:
+  al_brooks:
+    # Disabled by default. The M15/M1 baseline is authoritative until this is explicitly
+    # enabled AND the strategy is re-validated. See docs/architecture/ARCHITECTURE.md.
+    enabled: false
+    # What the engine is allowed to contribute when enabled.
+    #   none      -- direction only
+    #   geometry  -- direction, stop and target
+    allow_geometry: false
+
+filters:
+  # All filters are optional and disabled by default. Baseline behaviour is unchanged
+  # with every one of them off. See docs/research/FILTERS.md.
+  max_spread_points: 0
+  min_atr_points: 0
+  max_atr_points: 0
+  min_m1_range_points: 0
+  max_m1_range_points: 0
+  min_m15_body_ratio: 0.0
+  sessions: []
+  one_trade_per_candle: false

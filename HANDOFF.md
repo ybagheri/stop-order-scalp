@@ -108,6 +108,20 @@ Phases 1 through 12, exactly as listed in `ROADMAP.md`. In order:
 * **`git` is not on `PATH`** in the default PowerShell shell on this machine. It lives at
   `C:\Users\bagheri\AppData\Local\Programs\Git\cmd\git.exe`. Prepend it before any git
   command. This is a machine fact — it must not appear in application code or `.env`.
+* **Git's bundled MSYS2 `ssh` is broken on this machine.** `$env:HOME` is empty, so the
+  bundled `ssh` resolves `/home/bagheri/.ssh`, finds no key and no `known_hosts`, and every
+  remote operation fails with `Host key verification failed`. Fix for every git command:
+
+  ```powershell
+  $env:PATH  = "C:\Users\bagheri\AppData\Local\Programs\Git\cmd;" + $env:PATH
+  $env:GIT_SSH = "C:\Windows\System32\OpenSSH\ssh.exe"
+  ```
+
+  With `GIT_SSH` pointed at the Windows OpenSSH client, authentication to GitHub works
+  (`ssh -T git@github.com` → `Hi ybagheri!`). Port 22 to GitHub is intermittently slow —
+  a push can time out on the first attempt and succeed on the retry. Retry before
+  concluding the remote is unreachable.
+  The key `C:\Users\bagheri\.ssh\id_ed25519` is already registered with GitHub.
 * Python 3.13.12 at `C:\Users\bagheri\Downloads\python-3.13.12-embed-amd64` (embedded
   distribution). `python -m pip` works; console scripts are not on `PATH`. Use
   `python -m ...` invocations.

@@ -1,0 +1,131 @@
+[build-system]
+requires = ["setuptools>=77.0", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "stop-order-scalp"
+version = "0.1.0"
+description = "US30 stop-order scalping system: M15 direction filter, M1 stop entries, MT5 execution"
+readme = "README.md"
+requires-python = ">=3.11"
+license = { file = "LICENSE" }
+authors = [{ name = "Yaser Bagheri", email = "ybagheir83@gmail.com" }]
+
+# The core is stdlib-only apart from the YAML parser. This is deliberate: the
+# domain, strategy, risk, trailing and lifecycle layers must be importable and
+# testable on any machine with no broker software, no terminal and no native
+# dependency. Optional capabilities live in extras below.
+dependencies = [
+    "PyYAML>=6.0,<7.0",
+]
+
+[project.optional-dependencies]
+# Live and demo MetaTrader 5 execution. Broker-supplied binary package.
+mt5 = ["MetaTrader5>=5.0.45"]
+# Phase 8. MIT, optional, disabled by default.
+albrooks = ["albrooks>=0.1.0"]
+# Phase 9 analysis helpers. Not required to run the backtest engine itself.
+backtest = ["numpy>=1.26", "pandas>=2.0"]
+# Phase 12 sweeps.
+research = ["numpy>=1.26", "pandas>=2.0", "scipy>=1.11"]
+dev = [
+    "pytest>=8.0",
+    "pytest-cov>=5.0",
+    "hypothesis>=6.100",
+    "ruff>=0.6",
+    "mypy>=1.11",
+]
+
+[project.scripts]
+stop-order-scalp = "stop_order_scalp.cli.main:main"
+
+[project.urls]
+Homepage = "https://github.com/ybagheri/stop-order-scalp"
+Repository = "https://github.com/ybagheri/stop-order-scalp"
+Issues = "https://github.com/ybagheri/stop-order-scalp/issues"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.pytest.ini_options]
+minversion = "8.0"
+pythonpath = ["src"]
+testpaths = ["tests"]
+addopts = "-q --strict-markers --strict-config"
+markers = [
+    "integration: exercises more than one component; still hermetic",
+    "mt5: requires a reachable MetaTrader 5 terminal; skipped by default",
+    "live: may touch a real broker account; never enabled by default",
+]
+filterwarnings = ["error::DeprecationWarning:stop_order_scalp.*"]
+
+[tool.ruff]
+line-length = 100
+target-version = "py311"
+src = ["src", "tests"]
+
+[tool.ruff.lint]
+select = [
+    "E",    # pycodestyle errors
+    "W",    # pycodestyle warnings
+    "F",    # pyflakes
+    "I",    # import sorting
+    "UP",   # pyupgrade
+    "B",    # bugbear
+    "C4",   # comprehensions
+    "SIM",  # simplify
+    "RUF",  # ruff-specific
+    "ARG",  # unused arguments
+    "PTH",  # pathlib
+    "TID",  # tidy imports
+    "A",    # builtin shadowing
+]
+ignore = [
+    "E501",    # line length is handled by the formatter, not the linter
+    "B008",    # function call in default argument — used for DI sentinels
+    "RUF012",  # mutable class attributes need ClassVar annotations, not a blanket ban
+]
+
+[tool.ruff.lint.per-file-ignores]
+"tests/*" = ["ARG001", "ARG002", "S101"]
+
+[tool.ruff.lint.isort]
+known-first-party = ["stop_order_scalp"]
+
+[tool.mypy]
+python_version = "3.11"
+strict = true
+warn_unreachable = true
+show_error_codes = true
+pretty = true
+mypy_path = "src"
+files = ["src", "tests"]
+
+[[tool.mypy.overrides]]
+# MetaTrader5 ships no type information. It is confined to two modules and
+# scripts/check_architecture.py enforces that boundary.
+module = ["MetaTrader5.*", "MetaTrader5"]
+ignore_missing_imports = true
+
+[[tool.mypy.overrides]]
+# albrooks is an optional extra with no stub package.
+module = ["albrooks.*", "albrooks"]
+ignore_missing_imports = true
+
+[[tool.mypy.overrides]]
+module = ["yaml", "yaml.*"]
+ignore_missing_imports = true
+
+[tool.coverage.run]
+source = ["stop_order_scalp"]
+branch = true
+
+[tool.coverage.report]
+show_missing = true
+skip_covered = false
+exclude_lines = [
+    "pragma: no cover",
+    "if TYPE_CHECKING:",
+    "raise NotImplementedError",
+    "\\.\\.\\.",
+]
