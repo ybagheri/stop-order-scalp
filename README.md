@@ -7,13 +7,13 @@
 > **Status: under active development.** See [`ROADMAP.md`](ROADMAP.md) for what exists
 > today and [`HANDOFF.md`](HANDOFF.md) for the state of the last completed phase.
 >
-> **Phases 1–5 complete** (foundation, market data, core strategy, risk engine, order
-> execution). The domain layer, configuration, logging, the MetaTrader 5 feed, the
-> closed-candle freeze, the M15/M1 baseline decision, the position sizer and the idempotent
-> order manager are implemented and tested — **838 tests, no broker required**. Of the seven
-> CLI commands below, `validate-config` and `test-connection` work; the rest exit **4** and
-> say which phase has not landed. The command surface is fixed ahead of its implementations
-> on purpose, so the contract is testable now.
+> **Phases 1–6 complete** (foundation, market data, core strategy, risk engine, order
+> execution, position management). The domain layer, configuration, logging, the MetaTrader 5
+> feed, the closed-candle freeze, the M15/M1 baseline decision, the position sizer, the
+> idempotent order manager and the monotonic trailing stop are implemented and tested —
+> **931 tests, no broker required**. Of the seven CLI commands below, `validate-config` and
+> `test-connection` work; the rest exit **4** and say which phase has not landed. The command
+> surface is fixed ahead of its implementations on purpose, so the contract is testable now.
 >
 > **No profitability is claimed.** See [`docs/strategy/BASELINE.md`](docs/strategy/BASELINE.md).
 >
@@ -51,6 +51,7 @@ into the strategy, risk, or lifecycle code.
 | [`docs/strategy/BASELINE.md`](docs/strategy/BASELINE.md) | The exact strategy rules |
 | [`docs/risk/`](docs/risk/) | Sizing, commission, SL/TP semantics |
 | [`docs/execution/`](docs/execution/) | Order identity, idempotency, error classification |
+| [`docs/trailing/`](docs/trailing/) | Break-even, the trailing rule, monotonicity |
 | [`docs/mt5/`](docs/mt5/) | MT5 setup, symbol specifications, dry-run |
 | [`docs/testing/`](docs/testing/) | Test layout, property tests, how to run |
 | [`docs/operations/`](docs/operations/) | Deployment, troubleshooting, recovery |
@@ -102,7 +103,7 @@ Part of the contract, because a supervisor process depends on them.
 ## Development
 
 ```bash
-python -m pytest                             # 839 tests
+python -m pytest                             # 931 tests
 python -m ruff check .                       # lint
 python -m mypy                               # types, strict, src + tests
 python scripts/check_architecture.py         # architecture boundaries
@@ -219,10 +220,20 @@ every send, and identity is a deterministic tag that survives the terminal's 31-
 comment field, so duplicate detection still works after a restart. See
 [`docs/execution/EXECUTION.md`](docs/execution/EXECUTION.md).
 
+**A trailing stop that moves backwards is a bug, not a setting.** A BUY stop that follows price
+down walks through the entry and out the other side, closing a trade that was well in profit
+minutes earlier at a loss. The providers here return *no proposal* when a level would be worse
+than the stop already in place, so no code path can emit one — and monotonicity is proved over
+generated and adversarial price sequences rather than asserted on one example. Break-even's
+trigger is measured on the price a close would actually get (the bid for a BUY), so it cannot
+arm while the position is still underwater by the spread. See
+[`docs/trailing/TRAILING_MODEL.md`](docs/trailing/TRAILING_MODEL.md).
+
 See [`docs/architecture/ARCHITECTURE.md`](docs/architecture/ARCHITECTURE.md),
 [`docs/strategy/ENTRY_RULES.md`](docs/strategy/ENTRY_RULES.md),
-[`docs/risk/RISK_MODEL.md`](docs/risk/RISK_MODEL.md) and
-[`docs/execution/EXECUTION.md`](docs/execution/EXECUTION.md).
+[`docs/risk/RISK_MODEL.md`](docs/risk/RISK_MODEL.md),
+[`docs/execution/EXECUTION.md`](docs/execution/EXECUTION.md) and
+[`docs/trailing/TRAILING_MODEL.md`](docs/trailing/TRAILING_MODEL.md).
 
 ## Contributing
 

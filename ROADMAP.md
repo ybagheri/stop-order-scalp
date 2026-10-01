@@ -393,18 +393,68 @@ with `package_installed: false`. No live order has been placed.
 
 ---
 
-## Phase 6 — Position Management — `pending`
+## Phase 6 — Position Management — `complete`
 
 Implement:
 
 * `trailing/break_even.py`: configurable trigger, broker minimum distance, freeze level,
-  spread awareness, idempotent (no repeated modify on every tick)
-* `trailing/trailing_stop.py`: BUY `bid − d`, SELL `ask + d`, **monotonic**
-* `execution/position_manager.py`: BE → trailing → close detection
+  spread awareness, idempotent (no repeated modify on every tick) — **done**
+* `trailing/trailing_stop.py`: BUY `bid − d`, SELL `ask + d`, **monotonic** — **done**
+* `execution/position_manager.py`: BE → trailing — **done**; close detection is Phase 7, which
+  owns the loop that notices a position is gone
 * Property tests over generated price sequences:
-  BUY `sl_new >= sl_old`, SELL `sl_new <= sl_old`
+  BUY `sl_new >= sl_old`, SELL `sl_new <= sl_old` — **done**, over both `hypothesis` walks and
+  adversarial run-up-then-reversal paths
 
 Gate: BE/trailing tests + property tests, commit, push.
+
+### Decisions taken
+
+1. **Monotonicity is structural.** The provider returns no proposal when the level is not an
+   improvement, rather than clamping a backwards move after the fact. There is no code path
+   that can emit one, so the guarantee does not depend on a check being reached.
+2. **The trigger is measured on the exit side** — `bid` for a BUY, `ask` for a SELL. Measuring
+   on the mid arms break-even while the position is still underwater by the spread, and a stop
+   at entry is then hit immediately: a flat trade becomes a certain loss. Arithmetic, not a
+   filter.
+3. **Break-even wins outright; trailing is only consulted when it proposed nothing.** Both are
+   computed against the same position, so applying both in one tick applies a trailing level
+   derived from a stop that has already moved. The property test found this, not review.
+4. **`stops_level` and `freeze_level` are checked separately**, because they constrain
+   different things — where a stop may be placed, versus whether a position may be modified at
+   all — and satisfying the first does not satisfy the second.
+5. **Floating point never appears.** With `point = 0.1`, ten points is one price unit, so the
+   100-point trailing distance is `10.0` in price terms. Every conversion goes through
+   `points_to_price`.
+6. **A stop modification is never retried**, on the same reasoning as an order placement: the
+   stop may have moved, and a second request is interpreted against a state that no longer
+   exists. Reads are still retried.
+
+### Defects found and fixed during Phase 6
+
+Both were silent — every outcome still carried a plausible reason:
+
+* `BreakEvenRefusal.INSIDE_STOPS_LEVEL` did not exist. The class named it
+  `VIOLATES_STOPS_LEVEL`, so **every** break-even modification past the trigger would have
+  raised `AttributeError`. Caught by mypy.
+* The broker-limit helpers returned `bool | None` and were tested with `is not None`, so the
+  "false" case and the "not applicable" case were the same value and **every** modification was
+  refused. Caught by a test asserting that a modification *succeeds* on a normal
+  specification — the assertion that turns out to be the load-bearing one.
+
+### Known limitation
+
+`PositionManager` has no close detection. It evaluates the positions it is handed, so it
+notices nothing about a position the venue has closed. That belongs with the lifecycle, which
+already owns "position closed → place a replacement" and has the state to tell a close from a
+disappearance. Tracked in `HANDOFF.md`.
+
+### Not verified
+
+`MetaTrader5` is not installed on the development machine, so the `stops_level` and
+`freeze_level` semantics encode documented broker behaviour that has never been observed. A
+broker that behaves differently would show up as refusals where a modification was expected —
+the safe direction to fail, but unproven.
 
 ---
 

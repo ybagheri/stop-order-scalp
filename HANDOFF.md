@@ -10,9 +10,9 @@
 
 ## Current Phase
 
-**Phase 5 — Order Execution — COMPLETE and green.**
+**Phase 6 — Position Management — COMPLETE and green.**
 
-Next phase to execute: **Phase 6 — Position Management.**
+Next phase to execute: **Phase 7 — Lifecycle and Recovery.**
 
 ---
 
@@ -107,7 +107,38 @@ table.
 * 145 tests in `tests/execution/`, including the two headline properties: *the same plan
   placed twice yields one order*, and *an unknown send outcome is never resent*.
 
-### The property Phase 6 must preserve
+### Phase 6 — Position Management
+
+* `trailing/break_even.py` — `ConfiguredBreakEvenProvider` plus `exit_price_for`. The trigger
+  is measured on the side a close would actually get, so break-even cannot arm while the
+  position is still underwater by the spread.
+* `trailing/trailing_stop.py` — `TrailingStopProvider`: `bid − d` for a BUY, `ask + d` for a
+  SELL, on the tick grid, with `min_step_points` for idempotency.
+* `execution/position_manager.py` — break-even then trailing, one `modify_position` per real
+  change, `ActionKind` and `PositionAction` as the journal-facing vocabulary.
+* `docs/trailing/README.md` and `docs/trailing/TRAILING_MODEL.md`.
+* 87 tests in `tests/trailing/`, including monotonicity proved over `hypothesis` walks **and**
+  adversarial run-up-then-reversal paths.
+
+### What Phase 7 must preserve
+
+Three invariants, each of which a phase-7 loop could plausibly break:
+
+1. **`ExecutionUnknownError` is never retryable**, including for a *stop modification*. The
+   stop may have moved; a second request is interpreted against a state that no longer exists.
+   `PositionManager` deliberately calls `modify_position` once and lets exceptions propagate.
+2. **Break-even wins outright.** Both rules are computed against the same position, so applying
+   both in one tick applies a trailing level derived from an already-moved stop — for a SELL
+   just pulled down to entry, that lands *above* it. The property test found this.
+3. **An ordinary tick must cost no broker write.** Both providers are idempotent; do not add a
+   path that re-proposes a level already in place.
+
+### Carried into Phase 7
+
+`PositionManager` has **no close detection**: it evaluates the positions it is handed and
+notices nothing about one the venue has closed. Phase 7 owns that, because it already owns
+"position closed → place a replacement" and has the state to distinguish a close from a
+disappearance.
 
 `ExecutionUnknownError` is **never** retryable, anywhere. `retry.py` re-raises it
 immediately rather than riding it out, precisely so that a placement mistakenly passed in as a
@@ -134,6 +165,8 @@ docs/operations/README.md
 docs/research/README.md
 docs/execution/README.md
 docs/execution/EXECUTION.md
+docs/trailing/README.md
+docs/trailing/TRAILING_MODEL.md
 src/stop_order_scalp/market_data/candles.py
 src/stop_order_scalp/market_data/mt5_module.py
 src/stop_order_scalp/market_data/mt5_feed.py
@@ -151,6 +184,9 @@ src/stop_order_scalp/execution/order_manager.py
 src/stop_order_scalp/execution/mt5_broker.py
 src/stop_order_scalp/execution/simulated_broker.py
 src/stop_order_scalp/execution/retry.py
+src/stop_order_scalp/execution/position_manager.py
+src/stop_order_scalp/trailing/break_even.py
+src/stop_order_scalp/trailing/trailing_stop.py
 tests/strategy/conftest.py
 tests/strategy/test_candle_direction.py
 tests/strategy/test_entry_rules.py
@@ -168,6 +204,11 @@ tests/execution/test_mt5_broker.py
 tests/execution/test_mt5_classification.py
 tests/execution/test_simulated_broker.py
 tests/execution/test_retry.py
+tests/trailing/conftest.py
+tests/trailing/test_break_even.py
+tests/trailing/test_trailing_stop.py
+tests/trailing/test_position_manager.py
+tests/trailing/test_property_monotonic.py
 tests/unit/test_architecture.py
 tests/unit/test_cli.py
 tests/unit/test_interfaces.py
@@ -176,6 +217,15 @@ tests/unit/test_mt5.py
 ```
 
 ## Files Modified
+
+Phase 6:
+
+```
+src/stop_order_scalp/execution/retry.py    ReadOutcome made Generic, so a retried read keeps
+                                           its type rather than degrading to Any
+docs/trailing/*                           new
+ROADMAP.md, HANDOFF.md
+```
 
 Phase 5:
 
@@ -253,11 +303,11 @@ tests/conftest.py, tests/unit/*.py            annotations, hermetic .env
 
 ## Tests
 
-838 passing, 1 skipped.
+931 passing, 1 skipped.
 
 | File | Tests |
 | --- | --- |
-| `tests/unit/test_interfaces.py` | 96 |
+| `tests/unit/test_interfaces.py` | 102 |
 | `tests/unit/test_mt5.py` | 80 |
 | `tests/unit/test_config.py` | 55 |
 | `tests/risk/test_position_sizer.py` | 50 |
@@ -270,14 +320,18 @@ tests/conftest.py, tests/unit/*.py            annotations, hermetic .env
 | `tests/execution/test_mt5_broker.py` | 34 |
 | `tests/strategy/test_candle_direction.py` | 33 |
 | `tests/risk/test_risk_manager.py` | 30 |
+| `tests/trailing/test_position_manager.py` | 27 |
 | `tests/unit/test_timeframes.py` | 27 |
 | `tests/execution/test_simulated_broker.py` | 26 |
 | `tests/unit/test_cli.py` | 26 |
 | `tests/strategy/test_entry_rules.py` | 25 |
 | `tests/unit/test_logging.py` | 25 |
+| `tests/trailing/test_break_even.py` | 24 |
 | `tests/strategy/test_strategy.py` | 24 |
+| `tests/trailing/test_trailing_stop.py` | 23 |
 | `tests/risk/test_commission.py` | 21 |
 | `tests/execution/test_gates.py` | 19 |
+| `tests/trailing/test_property_monotonic.py` | 13 |
 | `tests/execution/test_order_manager.py` | 13 |
 | `tests/execution/test_retry.py` | 11 |
 
@@ -288,17 +342,17 @@ is genuinely optional.
 ## Test Results
 
 ```
-python -m pytest                             838 passed, 1 skipped
+python -m pytest                             931 passed, 1 skipped
 python -m ruff check .                       All checks passed!
-python -m mypy                               Success: no issues found in 75 source files
-python scripts/check_architecture.py         architecture OK: 43 modules checked
+python -m mypy                               Success: no issues found in 84 source files
+python scripts/check_architecture.py         architecture OK: 46 modules checked
 python -m stop_order_scalp validate-config   exit 0
 python -m stop_order_scalp test-connection   exit 3, reports package_installed: false
 ```
 
 ## Git Commit
 
-`feat(execution): idempotent order placement, retcode classification, and no-resend-on-unknown`
+`feat(trailing): break-even, monotonic trailing stop, and position management`
 
 ## Git Push
 

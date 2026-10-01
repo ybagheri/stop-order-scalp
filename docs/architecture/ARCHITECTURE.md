@@ -70,8 +70,11 @@ from the outside arrives as an argument.
 | `execution/mt5_broker.py` | 5 | Complete — native MT5 `Broker` plus retcode classification |
 | `execution/simulated_broker.py` | 5 | Complete — in-memory venue: bid/ask, stops, commission |
 | `execution/retry.py` | 5 | Complete — bounded backoff for safe reads only |
+| `execution/position_manager.py` | 6 | Complete — break-even then trailing, one request per change |
+| `trailing/break_even.py` | 6 | Complete — trigger, commission-aware target, broker limits |
+| `trailing/trailing_stop.py` | 6 | Complete — `bid − d` / `ask + d`, monotonic, minimum step |
 | `cli/main.py` | 1/2 | Contract complete; `validate-config` and `test-connection` implemented |
-| `trailing/`, `lifecycle/`, `application/`, `backtest/`, `research/`, `integrations/` | 6–12 | Empty packages, present so the boundary is real from day one |
+| `lifecycle/`, `application/`, `backtest/`, `research/`, `integrations/` | 7–12 | Empty packages, present so the boundary is real from day one |
 
 ## 4. The protocols
 
@@ -147,6 +150,34 @@ The codes in `execution.mt5_broker` are an interface in the same sense as
 silently become "this is a transient failure".
 
 See [`docs/execution/EXECUTION.md`](../execution/EXECUTION.md).
+
+## 4b. Monotonicity is structural
+
+A trailing stop that follows price *down* converts a winning trade into a losing one: a pullback
+walks the BUY stop through the entry and out the other side. The specification calls this out
+by name.
+
+It is prevented by refusing to emit the move rather than by clamping it afterwards:
+
+```python
+if not _is_improvement(level, current, side):
+    return TrailingDecision(None, TrailingRefusal.NOT_MONOTONIC, ...)
+```
+
+So there is no code path that can produce a backwards stop, and the invariant does not depend
+on a later check being reached. It is proved as a `hypothesis` property over generated price
+paths **and** over adversarial run-up-then-reversal sequences, which is what a review of one
+example cannot establish.
+
+Two related decisions worth knowing:
+
+* The break-even trigger is measured on the **exit side** — the bid for a BUY — because that is
+  where the profit is realised. Measuring on the mid arms it while the position is still
+  underwater by the spread, and a stop at entry is then hit immediately.
+* `stops_level` and `freeze_level` are checked **separately**: the first constrains where a stop
+  may be placed, the second whether an existing position may be modified at all.
+
+See [`docs/trailing/TRAILING_MODEL.md`](../trailing/TRAILING_MODEL.md).
 
 ## 5. Numbers are `Decimal`
 

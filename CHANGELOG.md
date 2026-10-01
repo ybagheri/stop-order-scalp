@@ -9,6 +9,69 @@ project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Phase 6 — Position Management
+
+#### Added
+
+- `trailing/break_even.py` — `ConfiguredBreakEvenProvider` and `exit_price_for`. Break-even
+  arms once price has moved the configured distance in favour, and the distance is measured
+  on the price a close would actually get: the **bid** for a BUY, the **ask** for a SELL.
+  Idempotent, and `COMMISSION_AWARE` pushes the stop past entry by the estimated round-trip
+  cost so a close at break-even is not a net loss.
+- `trailing/trailing_stop.py` — `TrailingStopProvider`: `bid − d` for a BUY, `ask + d` for a
+  SELL, rounded onto the tick grid away from entry, with `arm_after_points` and
+  `min_step_points`.
+- `execution/position_manager.py` — sequences break-even then trailing and sends at most one
+  `modify_position` per position per tick. `ActionKind`, `PositionAction` and `PositionUpdate`
+  are the journal-facing vocabulary, plus `describe()` for `status`.
+- `docs/trailing/README.md` and `docs/trailing/TRAILING_MODEL.md`.
+- 87 tests in `tests/trailing/`.
+
+#### Decisions
+
+- **Monotonicity is structural.** The providers return *no proposal* when a level is not an
+  improvement on the stop already in place, rather than clamping a backwards move afterwards.
+  No code path can emit one, so the guarantee does not depend on a later check being reached.
+- **Proved as a property, not an example.** `hypothesis` walks over generated paths *and* an
+  adversarial generator that builds a run-up followed by a reversal — the shape that tempts
+  the stop backwards. A second property asserts no stop level is ever proposed twice along a
+  path, which is what keeps a flat market from producing a request per tick.
+- **Break-even wins outright; trailing is only consulted when it proposed nothing.** Both are
+  computed against the same position, so applying both in one tick applies a trailing level
+  derived from a stop that has already moved — for a SELL just pulled down to entry, that lands
+  *above* it. The property test found this; review did not.
+- **`stops_level` and `freeze_level` are checked separately.** The first constrains where a stop
+  may be placed, the second whether an existing position may be modified at all. Satisfying
+  the first does not satisfy the second.
+- **A stop modification is never retried**, on the same reasoning as an order placement: the
+  stop may have moved, and a second request is interpreted against a state that no longer
+  exists. Reads are still retried with bounded backoff.
+- **`ReadOutcome` became `Generic`.** A retried read now keeps its type instead of degrading to
+  `Any`, so a caller reading positions cannot believe it read something else.
+
+#### Fixed
+
+- `BreakEvenRefusal.INSIDE_STOPS_LEVEL` was referenced but did not exist — the class named it
+  `VIOLATES_STOPS_LEVEL`. Every break-even modification past the trigger would have raised
+  `AttributeError`. Caught by mypy.
+- The broker-limit helpers returned `bool | None` and were tested with `is not None`, which made
+  the "false" case and the "not applicable" case the same value and so refused **every**
+  modification. Caught by a test asserting that a modification *succeeds* on a normal
+  specification — the assertion that turns out to be the load-bearing one.
+
+Both defects were silent: every outcome still carried a plausible-looking reason.
+
+#### Known limitations
+
+- `PositionManager` has **no close detection**. It evaluates the positions it is handed and
+  notices nothing about one the venue has closed. That belongs with the lifecycle, which already
+  owns "position closed → place a replacement" and has the state to distinguish a close from a
+  disappearance. Tracked in `HANDOFF.md`.
+- `MetaTrader5` is not installed on the development machine, so the `stops_level` and
+  `freeze_level` semantics encode documented broker behaviour that has never been observed. A
+  broker that differs would appear as refusals where a modification was expected — the safe
+  direction to fail, but unproven.
+
 ### Phase 5 — Order Execution
 
 #### Added

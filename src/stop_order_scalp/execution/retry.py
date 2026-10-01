@@ -17,7 +17,7 @@ brief broker outage becomes a process that has to be killed.
 from __future__ import annotations
 
 from collections.abc import Callable
-from typing import TypeVar
+from typing import Generic, TypeVar
 
 from stop_order_scalp.domain.exceptions import BrokerError, ExecutionUnknownError, RetryableError
 from stop_order_scalp.infrastructure.clock import sleep as real_sleep
@@ -31,8 +31,12 @@ T = TypeVar("T")
 _RETRYABLE: tuple[type[Exception], ...] = (RetryableError, BrokerError)
 
 
-class ReadOutcome:
-    """How a retried read ended. Returned so a caller can log the attempt count."""
+class ReadOutcome(Generic[T]):
+    """How a retried read ended. Returned so a caller can log the attempt count.
+
+    Generic rather than ``Any`` so that ``retry_read(...).value`` keeps its type: a caller
+    reading positions must not be able to believe it read something else.
+    """
 
     __slots__ = ("attempts", "value")
 
@@ -52,7 +56,7 @@ def retry_read(
     sleep: Callable[[float], None] | None = None,
     context: str = "read",
     on_retry: Callable[[int, float, Exception], None] | None = None,
-) -> ReadOutcome:
+) -> ReadOutcome[T]:
     """Call ``operation`` until it succeeds or the attempts run out.
 
     Only for operations that are **idempotent reads**: ``orders``, ``positions``,
