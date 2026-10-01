@@ -65,8 +65,13 @@ from the outside arrives as an argument.
 | `risk/stop_loss.py` | 4 | Complete — three stop providers |
 | `risk/take_profit.py` | 4 | Complete — three target providers and the precedence rule |
 | `risk/risk_manager.py` | 4 | Complete — sizing, validation, rejection codes |
+| `execution/gates.py` | 5 | Complete — `OrderGate`, `CloseGate`, `LiveInterlock`; all default closed |
+| `execution/order_manager.py` | 5 | Complete — idempotent placement, duplicate and position refusal |
+| `execution/mt5_broker.py` | 5 | Complete — native MT5 `Broker` plus retcode classification |
+| `execution/simulated_broker.py` | 5 | Complete — in-memory venue: bid/ask, stops, commission |
+| `execution/retry.py` | 5 | Complete — bounded backoff for safe reads only |
 | `cli/main.py` | 1/2 | Contract complete; `validate-config` and `test-connection` implemented |
-| `execution/`, `trailing/`, `lifecycle/`, `application/`, `backtest/`, `research/`, `integrations/` | 5–12 | Empty packages, present so the boundary is real from day one |
+| `trailing/`, `lifecycle/`, `application/`, `backtest/`, `research/`, `integrations/` | 6–12 | Empty packages, present so the boundary is real from day one |
 
 ## 4. The protocols
 
@@ -119,6 +124,29 @@ Two asymmetries worth knowing:
   is already safe.
 
 See [`docs/risk/RISK_MODEL.md`](../risk/RISK_MODEL.md).
+
+## 4a. An ambiguous send is not a failed send
+
+The distinction the execution layer is built around: **did the order reach the venue?**
+
+MetaTrader 5 reports every failure as a numeric `retcode`, and some of them mean only "the
+terminal cannot say". A timeout is the clearest case — the request may well have been
+processed. Treating that as "not sent" and resending is how one order becomes two positions.
+
+So the codes that cannot be interpreted become `ExecutionUnknownError`, which is **never**
+retryable. The response is to re-read broker state and find out. Reads *are* retried, with
+bounded exponential backoff, because reading the book twice returns the same answer.
+
+A consequence worth stating: broker state is re-read **immediately before every send**, not
+cached from earlier in the cycle. A cached read is correct until the process is interrupted,
+and an interruption between "decided to place" and "read the book" is exactly the case that
+duplicates a position.
+
+The codes in `execution.mt5_broker` are an interface in the same sense as
+`risk/risk_manager.RejectionCode` — an alert built on "this is an unknown outcome" must not
+silently become "this is a transient failure".
+
+See [`docs/execution/EXECUTION.md`](../execution/EXECUTION.md).
 
 ## 5. Numbers are `Decimal`
 

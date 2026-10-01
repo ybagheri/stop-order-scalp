@@ -10,7 +10,7 @@ This page is the short version, and it is accurate today.
 ```bash
 python -m pip install -e ".[dev]"
 
-python -m pytest                             # 683 tests, 1 skipped
+python -m pytest                             # 839 tests, 1 skipped
 python -m ruff check .                       # lint
 python -m mypy                               # types, strict, src + tests
 python scripts/check_architecture.py         # architecture boundaries
@@ -23,24 +23,30 @@ python scripts/check_architecture.py         # architecture boundaries
 
 | File | Tests | Covers |
 | --- | --- | --- |
-| `tests/unit/test_mt5.py` | 72 | The MT5 boundary against a fake terminal: lazy import, converters, feed, `ServerClock`, `probe_connection` |
-| `tests/unit/test_interfaces.py` | 62 | The four protocols; every module imports; every `__all__` entry resolves |
+| `tests/unit/test_interfaces.py` | 96 | The protocols; every module imports; every `__all__` entry resolves |
+| `tests/unit/test_mt5.py` | 80 | The MT5 boundary against a fake terminal: lazy import, converters, feed, `ServerClock`, `probe_connection`, the execution surface |
 | `tests/unit/test_config.py` | 55 | Three-layer config, unknown-key rejection, `.env` precedence, secret handling |
 | `tests/risk/test_position_sizer.py` | 50 | The worked example, points-vs-dollars, rounding, broker bounds, sizing properties |
 | `tests/unit/test_value_objects.py` | 46 | `Price`, `Money`, `Volume`, `SymbolSpecification`, point/price arithmetic |
-| `tests/unit/test_candles.py` | 43 | The freeze, the report, timezone handling, the no-look-ahead properties |
+| `tests/unit/test_candles.py` | 45 | The freeze, the report, timezone handling, the no-look-ahead properties |
+| `tests/execution/test_mt5_classification.py` | 42 | Retcode buckets, and that no ambiguous code is ever retryable |
+| `tests/execution/test_mt5_broker.py` | 34 | One `order_send` per placement, wire values, comment encoding |
 | `tests/strategy/test_signal.py` | 37 | The decision, the no-trade reasons, the instrument policy, and the no-look-ahead properties |
-| `tests/unit/test_architecture.py` | 34 | The architecture gate itself, including deliberately broken source |
+| `tests/unit/test_architecture.py` | 35 | The architecture gate itself, including deliberately broken source |
 | `tests/strategy/test_candle_direction.py` | 33 | The five verdicts, closed-candle enforcement, the doji case |
-| `tests/risk/test_stop_loss_take_profit.py` | 41 | Stop and target providers, rounding asymmetry, target precedence |
-| `tests/risk/test_commission.py` | 30 | Round-trip versus per-side, and that they differ by exactly two |
+| `tests/risk/test_stop_loss_take_profit.py` | 39 | Stop and target providers, rounding asymmetry, target precedence |
+| `tests/risk/test_risk_manager.py` | 30 | Sizing end to end, and every rejection code |
+| `tests/execution/test_simulated_broker.py` | 26 | Bid/ask fills, stops, commission, the injected clock |
+| `tests/unit/test_cli.py` | 26 | Parser surface, exit codes, commands whose phase has not landed |
 | `tests/unit/test_timeframes.py` | 27 | Period seconds, boundary math, candle closure, timezone handling |
 | `tests/strategy/test_entry_rules.py` | 25 | The two entry rules, points resolution, entry-vs-stop rounding |
-| `tests/unit/test_cli.py` | 25 | Parser surface, exit codes, commands whose phase has not landed |
 | `tests/unit/test_logging.py` | 25 | JSONL audit records, rotation, structural absence of secrets |
 | `tests/strategy/test_strategy.py` | 24 | Construction refusals, dispatch, the self-describing rule |
-| `tests/risk/test_risk_manager.py` | 19 | Sizing end to end, and every rejection code |
-| **Total** | **683** (1 skipped) | |
+| `tests/execution/test_gates.py` | 19 | The three-fold interlock, and that both gates default closed |
+| `tests/execution/test_order_manager.py` | 13 | Duplicate prevention, and that an unknown outcome is never resent |
+| `tests/execution/test_retry.py` | 11 | Bounded backoff, and that it never rides out an ambiguous send |
+| `tests/risk/test_commission.py` | 21 | Round-trip versus per-side, and that they differ by exactly two |
+| **Total** | **839** (1 skipped) | |
 
 The one skip is the cross-check of `freeze_closed_bars` against the independent Al Brooks
 implementation, which needs the optional `albrooks` extra. It is the only skip in the suite

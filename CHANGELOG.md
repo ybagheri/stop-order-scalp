@@ -9,6 +9,81 @@ project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Phase 5 — Order Execution
+
+#### Added
+
+- `execution/gates.py` — `OrderGate`, `CloseGate` and `LiveInterlock`. Both gates default
+  to **closed**; `LIVE` requires the environment, `SOS_ALLOW_LIVE` and the operation's own
+  switch, and any two are not enough. Closing positions has a switch separate from opening
+  them: automatic closing on a losing streak is exactly when an operator wants it off.
+  Refusals are ordered cheapest-first so the reason reported is the one to act on.
+- `execution/order_manager.py` — idempotent placement. Broker state is re-read
+  **immediately before every send**, not cached from earlier in the cycle: a cached read is
+  correct until the process is interrupted, and an interruption between "decided to place"
+  and "read the book" is exactly the case that duplicates a position. Refusals are values
+  (`PlacementOutcome`, `RefusalCode`) rather than exceptions, because refusing a duplicate is
+  correct behaviour that happens routinely.
+- `execution/mt5_broker.py` — the native MT5 `Broker`, plus `classify()`. The retcode table
+  has three buckets, not two: see Decisions.
+- `execution/simulated_broker.py` — an in-memory venue with real bid/ask fills, pending
+  stops resting on the book, SL/TP settlement on the correct side, magic numbers and
+  commission charged on close. Not a test double: it is what `DRY_RUN` and `PAPER` run
+  against, which is the only reason a dry run proves anything.
+- `execution/retry.py` — bounded exponential backoff for **safe reads only**.
+- `docs/execution/README.md` and `docs/execution/EXECUTION.md`.
+- 145 tests in `tests/execution/`.
+
+#### Decisions
+
+- **The retcode table has three buckets, not two.** "Retryable" versus "terminal" cannot
+  classify `10012` (timeout) or `10031` (connection lost), because the request may already
+  have reached the venue. Those become `ExecutionUnknownError`, which is never retryable; the
+  caller re-observes broker state instead. An **unrecognised** retcode is treated as unknown
+  rather than terminal — being wrong pessimistically costs a re-read, being wrong
+  optimistically costs a duplicate position.
+- **No layer retries a send.** Not the broker, not the manager, not `retry.py`, which
+  re-raises `ExecutionUnknownError` immediately precisely so that a placement mistakenly
+  passed in as a read cannot be ridden out.
+- **Duplicates match on the client tag, never on price.** Price matching would treat a new
+  setup at the same level as a duplicate and would miss a duplicate whose price moved. The
+  derivation lives in exactly one place, `OrderIntent.client_tag_for(plan)`, so the check and
+  the sent order cannot disagree.
+- **The identity tag is packed into the terminal's comment, tag first.** MT5 has no
+  client-order-id and truncates comments at 31 characters; a 20-character tag leaves about
+  ten for prose. A documented trade-off, and identity is worth more than prose.
+- **A cancellation asks the order book, not the retcode.** Its goal is that the order is not
+  on the book, so an ambiguous response is resolved by re-reading rather than retried.
+- **Floating P/L is gross and commission is charged once, at close.** Charging it in both
+  places would report less equity than a live account actually has.
+
+#### Changed
+
+- `domain/models.py` — `OrderIntent.client_tag_for()` extracted as the single public place
+  the identity tag is derived.
+- `domain/interfaces.py` — `AccountReader` gained `specification()`. The risk engine needs the
+  **broker's own** contract numbers — tick size, tick value, contract size, stops level — and
+  those come from the venue, not from a price series.
+- `market_data/mt5_module.py` — `MT5Api` gained `order_send`, `order_get`, `orders_get` and
+  `positions_get`. The dependency surface stays described in one module rather than gaining a
+  second, private description in the execution layer.
+- `infrastructure/clock.py` — `sleep()` added, so `import time` has exactly one home. The
+  architecture check already refused it elsewhere; making the legal home explicit keeps retry
+  testable without a real wait.
+- `risk/risk_manager.py` — `risk_settings` and `target_settings` exposed, so a caller that
+  re-assesses against live state uses the same settings the manager was built with rather
+  than reconstructing defaults that could differ.
+
+#### Known limitations
+
+- `OrderManager.place(settings=None)` skips the gate check. Correct for `DRY_RUN` and
+  `PAPER`, where the venue is the simulator, but a caller that hands it a real broker and
+  omits `settings` would route orders ungated. Phase 7's composition root should make the
+  environment explicit rather than optional. Not a defect in any current call path.
+- `MetaTrader5` is not installed on the development machine, so the wire values, the retcode
+  table and the tag encoding have never met a real terminal. `test-connection` correctly
+  exits 3 with `package_installed: false`. No live order has been placed.
+
 ### Phase 0 — Repository Audit
 #### Added
 

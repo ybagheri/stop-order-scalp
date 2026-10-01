@@ -81,6 +81,14 @@ class FakeTerminal:
         self.connect_ok = True
         self.rates_fail = False
         self.server_time = SERVER_EPOCH
+        # --- execution surface, added in Phase 5 ---
+        #: Every request handed to ``order_send``, in order. Asserting ``len(terminal.sent)``
+        #: is how the no-retry guarantee is proved.
+        self.sent: list[dict[str, Any]] = []
+        #: Non-zero makes ``order_send`` report this retcode instead of accepting.
+        self.send_retcode = 0
+        self.order_rows: list[dict[str, Any]] = []
+        self.position_rows: list[dict[str, Any]] = []
         self.account_row: dict[str, Any] = {
             "login": 5050123,
             "server": "Alpari-Express-Demo",
@@ -157,6 +165,36 @@ class FakeTerminal:
     def symbol_info_tick(self, name: str) -> Any:
         del name
         return SimpleNamespace(**self.tick_row) if self.tick_row else None
+
+    def order_send(self, request: dict[str, Any]) -> Any:
+        self.sent.append(dict(request))
+        if self.send_retcode:
+            return SimpleNamespace(
+                retcode=self.send_retcode, order=0, comment="injected failure"
+            )
+        ticket = 5000 + len(self.sent)
+        return SimpleNamespace(retcode=10008, order=ticket, comment="request placed")
+
+    def order_get(self, *, ticket: int) -> Any:
+        for row in self.order_rows:
+            if row.get("ticket") == ticket:
+                return SimpleNamespace(**row)
+        return None
+
+    def orders_get(self, *, symbol: str | None = None) -> Any:
+        rows = [r for r in self.order_rows if symbol is None or r.get("symbol") == symbol]
+        return [SimpleNamespace(**r) for r in rows]
+
+    def positions_get(
+        self, *, symbol: str | None = None, ticket: int | None = None
+    ) -> Any:
+        rows = [
+            r
+            for r in self.position_rows
+            if (symbol is None or r.get("symbol") == symbol)
+            and (ticket is None or r.get("ticket") == ticket)
+        ]
+        return [SimpleNamespace(**r) for r in rows]
 
     def copy_rates_from_pos(
         self, symbol: str, timeframe: int, start_pos: int, count: int

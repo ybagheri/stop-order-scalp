@@ -1,0 +1,585 @@
+"""``Broker`` over the native MetaTrader 5 API, and the error classification that matters.
+
+One of only three modules permitted to name ``MetaTrader5``, and even here the ``import``
+belongs to :mod:`stop_order_scalp.market_data.mt5_module` -- this module reaches the
+terminal through :class:`~stop_order_scalp.market_data.mt5_module.MT5Module` rather than
+importing the package again, so there is exactly one place that knows how to load it.
+
+The most important function in this module is :func:`classify`, because everything else is
+mechanical. MetaTrader 5 reports every failure as a numeric ``retcode``, and the single
+question that matters is:
+
+    **did the order reach the venue or not?**
+
+Get that wrong in the optimistic direction -- assume a retcode means "not sent" and resend
+-- and one order becomes two. Wrong in the pessimistic direction and a position is missed
+until the next signal. So the ambiguous codes become
+:class:`~stop_order_scalp.domain.exceptions.ExecutionUnknownError`, which the caller handles
+by re-reading broker state. It is never retried.
+"""
+
+from __future__ import annotations
+
+import os
+from collections.abc import Iterator
+from datetime import UTC, datetime
+from decimal import Decimal
+from typing import Any, Final
+
+from stop_order_scalp.domain.enums import OrderKind, Side
+from stop_order_scalp.domain.exceptions import (
+    BrokerError,
+    BrokerNotConnectedError,
+    BrokerRejectedError,
+    ExecutionUnknownError,
+    RetryableError,
+    SymbolNotFoundError,
+)
+from stop_order_scalp.domain.models import (
+    AccountSnapshot,
+    EnvironmentSettings,
+    OrderIntent,
+    OrderRecord,
+    PositionRecord,
+    Tick,
+)
+from stop_order_scalp.domain.value_objects import Money, Price, SymbolSpecification, Volume
+from stop_order_scalp.market_data.mt5_module import (
+    MT5Api,
+    MT5Module,
+    account_info_to_snapshot,
+    epoch_to_datetime,
+    field,
+    symbol_info_to_specification,
+    tick_info_to_tick,
+)
+
+__all__ = ["MetaTrader5Broker", "classify"]
+
+# =============================================================================
+# Return codes, from the terminal's own TRADE_RETCODE_* enumeration
+# =============================================================================
+#
+# Only the codes this project can actually produce, or must recognise, are listed. The full
+# enumeration belongs to the terminal; copying all of it would be a maintenance liability
+# with no benefit. Anything unrecognised is treated as *ambiguous*, which is the safe
+# direction -- see :func:`classify`.
+
+#: Accepted: fully executed.
+RETCODE_DONE: Final[int] = 10009
+#: Accepted: resting as a pending order.
+RETCODE_PLACED: Final[int] = 10008
+#: Accepted: partially executed.
+RETCODE_PARTIAL: Final[int] = 10010
+#: Refused on its merits.
+RETCODE_REJECTED: Final[int] = 10006
+#: Generic "invalid request" -- the one a malformed trade request produces.
+RETCODE_INVALID: Final[int] = 10013
+RETCODE_INVALID_VOLUME: Final[int] = 10014
+RETCODE_INVALID_PRICE: Final[int] = 10015
+#: Stops too close to the market, or on the wrong side of the entry. The single most
+#: common Phase 5 rejection, and the reason ``stops_level`` is checked before sending.
+RETCODE_INVALID_STOPS: Final[int] = 10016
+#: Trading disabled for the account.
+RETCODE_TRADE_DISABLED: Final[int] = 10017
+#: Market closed. "Not now", not "no".
+RETCODE_MARKET_CLOSED: Final[int] = 10018
+#: Not enough free margin. Terminal for this attempt; the caller must re-size.
+RETCODE_NO_MONEY: Final[int] = 10019
+#: Price moved. Retryable.
+RETCODE_PRICE_CHANGED: Final[int] = 10020
+#: Price is off the quotes. Retryable.
+RETCODE_PRICE_OFF: Final[int] = 10021
+#: Terminal busy. Retryable.
+RETCODE_TOO_BUSY: Final[int] = 10024
+#: Ambiguous: a failure with no detail.
+RETCODE_ERROR: Final[int] = 10011
+#: Ambiguous: the request timed out, so it may have been processed.
+RETCODE_TIMEOUT: Final[int] = 10012
+#: Ambiguous: connection dropped mid-request, so it may have been processed.
+RETCODE_CONNECTION: Final[int] = 10031
+#: Ambiguous: trade context is busy, which can mean the request is still in flight.
+RETCODE_CONTEXT_BUSY: Final[int] = 10028
+#: Ambiguous: trade context is frozen while a deal is being processed.
+RETCODE_CONTEXT_FROZEN: Final[int] = 10029
+#: Ambiguous: internal error.
+RETCODE_INTERNAL_ERROR: Final[int] = -1
+
+#: Accepted, in some form.
+_ACCEPTED: Final[frozenset[int]] = frozenset(
+    {RETCODE_DONE, RETCODE_PLACED, RETCODE_PARTIAL}
+)
+
+#: Refused on its merits. A resend will be refused identically.
+_TERMINAL: Final[frozenset[int]] = frozenset(
+    {
+        RETCODE_REJECTED,
+        RETCODE_INVALID,
+        RETCODE_INVALID_VOLUME,
+        RETCODE_INVALID_PRICE,
+        RETCODE_INVALID_STOPS,
+        RETCODE_TRADE_DISABLED,
+        RETCODE_NO_MONEY,
+    }
+)
+
+#: "Not now"; trying again later may work.
+_RETRYABLE: Final[frozenset[int]] = frozenset(
+    {RETCODE_MARKET_CLOSED, RETCODE_PRICE_CHANGED, RETCODE_PRICE_OFF, RETCODE_TOO_BUSY}
+)
+
+#: The request may or may not have been processed. **Never resend these.**
+#:
+#: Each of these is a case where the terminal could not tell us, which means the order may
+#: exist on the venue. The only correct response is to re-read broker state and find out.
+_UNKNOWN: Final[frozenset[int]] = frozenset(
+    {
+        RETCODE_ERROR,
+        RETCODE_TIMEOUT,
+        RETCODE_CONNECTION,
+        RETCODE_CONTEXT_BUSY,
+        RETCODE_CONTEXT_FROZEN,
+        RETCODE_INTERNAL_ERROR,
+    }
+)
+
+
+def classify(retcode: int, message: str, *, context: str) -> None:
+    """Raise the right exception for a terminal ``retcode``.
+
+    :raises ExecutionUnknownError: for an ambiguous outcome. Never retryable, and the
+        single most important branch in the project: the request may have reached the
+        venue, and resending is how one order becomes two.
+    :raises BrokerRejectedError: for a refusal on its merits. A resend will be refused
+        identically, so retrying wastes the chance that something changed.
+    :raises RetryableError: for "not now".
+    """
+    if retcode in _ACCEPTED:
+        return
+    detail = f"{context}: retcode {retcode} ({message})"
+    if retcode in _UNKNOWN:
+        raise ExecutionUnknownError(
+            f"{detail} -- the terminal cannot say whether the request reached the venue. "
+            "Do NOT resend; re-read broker state for this magic number."
+        )
+    if retcode in _TERMINAL:
+        raise BrokerRejectedError(f"{detail} -- refused on its merits")
+    if retcode in _RETRYABLE:
+        raise RetryableError(f"{detail} -- not now, try again later")
+    # An unrecognised code is treated as ambiguous rather than terminal. Being wrong in the
+    # pessimistic direction costs one re-read; being wrong in the optimistic one costs a
+    # duplicate.
+    raise ExecutionUnknownError(
+        f"{detail} -- unrecognised retcode, treated as an unknown outcome. Do NOT resend."
+    )
+
+
+class MetaTrader5Broker:
+    """``Broker`` implemented over the native MetaTrader 5 Python API.
+
+    Places and cancels orders, modifies positions, and reads account, book and server time.
+    It **never retries a send internally** -- that is the caller's decision, made through
+    the lifecycle state machine.
+
+    Credentials: the password is read from the environment at connect time and is never
+    stored on this object. ``EnvironmentSettings`` holds only a presence flag, by design.
+    """
+
+    __slots__ = ("_connected", "_module", "_settings")
+
+    def __init__(
+        self,
+        module: MT5Module | None = None,
+        settings: EnvironmentSettings | None = None,
+    ) -> None:
+        self._module = module if module is not None else MT5Module()
+        self._settings = settings
+        self._connected = False
+
+    # --- connection ------------------------------------------------------
+
+    def connect(self) -> None:
+        """Start or attach to the terminal. Idempotent.
+
+        ``Broker.connect`` takes no arguments, so ``EnvironmentSettings`` is supplied at
+        construction. Password comes from ``SOS_MT5_PASSWORD`` and is never retained.
+        """
+        settings = self._settings
+        if settings is None:
+            raise BrokerError("MetaTrader5Broker needs EnvironmentSettings before connect()")
+        if self._connected:
+            return
+        ok = self._module.api().initialize(
+            path=settings.mt5_path,
+            login=settings.mt5_login,
+            password=os.environ.get("SOS_MT5_PASSWORD") or None,
+            server=settings.mt5_server,
+            timeout=settings.mt5_timeout_ms,
+            portable=False,
+        )
+        if not ok:
+            code, message = self._module.describe_last_error()
+            raise BrokerNotConnectedError(
+                f"MetaTrader 5 refused to initialize (code {code}): {message}"
+            )
+        self._connected = True
+
+    def shutdown(self) -> None:
+        """Tear the session down. Idempotent, and safe when never connected."""
+        if self._connected:
+            self._module.api().shutdown()
+            self._connected = False
+
+    @property
+    def is_connected(self) -> bool:
+        return self._connected
+
+    def _api(self) -> MT5Api:
+        if not self._connected:
+            raise BrokerNotConnectedError("not connected to MetaTrader 5; call connect()")
+        return self._module.api()
+
+    # --- account and symbol reads ---------------------------------------
+
+    def account(self) -> AccountSnapshot:
+        info = self._api().account_info()
+        if info is None:
+            raise BrokerNotConnectedError("the terminal returned no account information")
+        return account_info_to_snapshot(info)
+
+    def server_time(self) -> datetime:
+        """Broker server time. The only clock that may decide whether a candle has closed."""
+        seconds = self._api().time_current()
+        if not seconds:
+            raise BrokerNotConnectedError("the terminal reported no server time")
+        return epoch_to_datetime(seconds)
+
+    def symbol_available(self, symbol: str) -> bool:
+        return bool(self._api().symbol_info(symbol))
+
+    def specification(self, symbol: str) -> SymbolSpecification:
+        info = self._api().symbol_info(symbol)
+        if info is None:
+            raise SymbolNotFoundError(
+                f"the terminal does not know a symbol called {symbol!r}"
+            )
+        return symbol_info_to_specification(info)
+
+    def leverage_for(self, symbol: str) -> Decimal:
+        info = self._api().symbol_info(symbol)
+        if info is None:
+            raise SymbolNotFoundError(f"the terminal does not know a symbol called {symbol!r}")
+        return Decimal(str(field(info, "leverage", 100) or 100))
+
+    # --- prices ----------------------------------------------------------
+
+    def tick(self, symbol: str) -> Tick | None:
+        info = self._api().symbol_info_tick(symbol)
+        if info is None:
+            return None
+        return tick_info_to_tick(info, digits=self.specification(symbol).digits)
+
+    def stream_ticks(self, symbol: str) -> Iterator[Tick]:
+        """Yield ticks as they arrive. Used by ``PAPER``, which writes nothing.
+
+        Polls rather than subscribing: the terminal's own streaming API is not available to
+        every build, and a PAPER mode that follows prices a second late is still following
+        them. The trade-off is documented rather than hidden.
+        """
+        api = self._api()
+        last = 0
+        while self._connected:
+            info = api.symbol_info_tick(symbol)
+            if info is not None:
+                moment = int(field(info, "time_ms", 0) or 0) // 1000
+                if moment and moment != last:
+                    last = moment
+                    yield tick_info_to_tick(
+                        info, digits=self.specification(symbol).digits
+                    )
+            else:
+                code, message = self._module.describe_last_error()
+                raise BrokerNotConnectedError(f"tick stream for {symbol} failed: {code} {message}")
+
+    # --- order book ------------------------------------------------------
+
+    def orders(
+        self, *, magic_number: int | None = None, symbol: str | None = None
+    ) -> list[OrderRecord]:
+        """Working orders for this magic number.
+
+        Read immediately before every send. A cached copy is correct until the process is
+        interrupted, and an interruption between "decided to place" and "read the book" is
+        exactly the case that produces a duplicate position.
+        """
+        api = self._api()
+        rows = api.orders_get(symbol=symbol) if symbol else api.orders_get()
+        digits = self.specification(symbol).digits if symbol else 2
+        found = [
+            _order_from(row, digits)
+            for row in rows or ()
+            if magic_number is None or int(field(row, "magic", 0) or 0) == magic_number
+        ]
+        return sorted(found, key=lambda record: record.ticket)
+
+    def positions(
+        self, *, magic_number: int | None = None, symbol: str | None = None
+    ) -> list[PositionRecord]:
+        api = self._api()
+        rows = api.positions_get(symbol=symbol) if symbol else api.positions_get()
+        digits = self.specification(symbol).digits if symbol else 2
+        found = [
+            _position_from(row, digits)
+            for row in rows or ()
+            if magic_number is None or int(field(row, "magic", 0) or 0) == magic_number
+        ]
+        return sorted(found, key=lambda record: record.ticket)
+
+    def position_by_ticket(self, ticket: int) -> PositionRecord | None:
+        api = self._api()
+        rows = api.positions_get(ticket=ticket)
+        if not rows:
+            return None
+        row = rows[0]
+        name = str(field(row, "symbol", "") or "")
+        digits = self.specification(name).digits if name else 2
+        return _position_from(row, digits)
+
+    # --- writes ----------------------------------------------------------
+
+    def place_order(self, intent: OrderIntent) -> OrderRecord:
+        """Send one pending order. Exactly one ``order_send``, and never a second.
+
+        A failure is classified and raised. The only correct response to an
+        :class:`ExecutionUnknownError` is to re-read broker state.
+        """
+        api = self._api()
+        request: dict[str, Any] = {
+            "action": _ACTION_PENDING,
+            "symbol": intent.symbol,
+            "type": _MT5_TYPE[intent.kind],
+            "volume": float(intent.volume.lots),
+            "price": float(intent.entry.value),
+            "sl": float(intent.stop_loss.value),
+            "tp": float(intent.take_profit.value),
+            "deviation": intent.deviation_points,
+            "magic": intent.magic_number,
+            "comment": encode_comment(intent.client_tag, intent.comment),
+            "type_filling": _FILLING,
+        }
+        if intent.expiration is not None:
+            request["expiration"] = int(intent.expiration.timestamp())
+        result = api.order_send(request)
+        classify(
+            int(field(result, "retcode", -1) or 0),
+            str(field(result, "comment", "") or ""),
+            context=f"placing {intent.kind} on {intent.symbol}",
+        )
+        ticket = int(field(result, "order", 0) or 0)
+        placed = api.order_get(ticket=ticket) if ticket else None
+        if placed is None:
+            # Accepted, but not yet readable. The send succeeded; observing it is a
+            # separate concern that belongs to the lifecycle, not here.
+            return _intent_record(intent, ticket)
+        return _order_from(placed, intent.entry.digits)
+
+    def cancel_order(self, ticket: int) -> bool:
+        """Delete a working order. ``True`` if it is gone afterwards, including if absent.
+
+        Implemented by *asking the book*, not by trusting the retcode. A cancellation whose
+        response is ambiguous is not a failure to be retried -- it is a question, and the
+        order book is where the answer lives.
+        """
+        api = self._api()
+        result = api.order_send({"action": _ACTION_PENDING, "order": ticket})
+        retcode = int(field(result, "retcode", -1) or 0)
+        if retcode not in _ACCEPTED:
+            if retcode in _UNKNOWN:
+                # The terminal lost track of the outcome. Falling through to the re-read
+                # below is correct: what matters is only whether the order is still there.
+                pass
+            else:
+                classify(
+                    retcode,
+                    str(field(result, "comment", "") or ""),
+                    context=f"cancelling order {ticket}",
+                )
+        return not api.orders_get(symbol=None) or all(
+            int(field(row, "ticket", 0) or 0) != ticket
+            for row in api.orders_get() or ()
+        )
+
+    def modify_position(
+        self, ticket: int, *, stop_loss: Any = None, take_profit: Any = None
+    ) -> bool:
+        """Change a position's protective levels. Idempotent: a no-op change is success.
+
+        ``TRADE_ACTION_SLTP`` rather than a deal request: this never fills anything, it only
+        moves the stops on a position that already exists.
+        """
+        api = self._api()
+        request: dict[str, Any] = {
+            "action": _ACTION_SLTP,
+            "position": ticket,
+            "sl": float(stop_loss.value) if isinstance(stop_loss, Price) else _UNSET_FLOAT,
+            "tp": float(take_profit.value) if isinstance(take_profit, Price) else _UNSET_FLOAT,
+        }
+        result = api.order_send(request)
+        classify(
+            int(field(result, "retcode", -1) or 0),
+            str(field(result, "comment", "") or ""),
+            context=f"modifying position {ticket}",
+        )
+        return True
+
+    def __repr__(self) -> str:
+        return f"MetaTrader5Broker(connected={self._connected})"
+
+
+# =============================================================================
+# Wire constants and row converters
+# =============================================================================
+
+#: ``TRADE_REQUEST_ACTIONS``.
+_ACTION_DEAL: Final[int] = 0
+_ACTION_PENDING: Final[int] = 1
+_ACTION_SLTP: Final[int] = 2
+_ACTION_MODIFY: Final[int] = 3
+
+#: ``ORDER_TYPE_*``. Distinct values, and the inverse map is keyed off the same table.
+_TYPE_BUY: Final[int] = 0
+_TYPE_SELL: Final[int] = 1
+_TYPE_BUY_LIMIT: Final[int] = 2
+_TYPE_SELL_LIMIT: Final[int] = 3
+_TYPE_BUY_STOP: Final[int] = 4
+_TYPE_SELL_STOP: Final[int] = 5
+
+#: Our ``OrderKind`` to the terminal's order type.
+_MT5_TYPE: Final[dict[OrderKind, int]] = {
+    OrderKind.ORDER_KIND_BUY_STOP: _TYPE_BUY_STOP,
+    OrderKind.ORDER_KIND_SELL_STOP: _TYPE_SELL_STOP,
+    OrderKind.ORDER_KIND_BUY_LIMIT: _TYPE_BUY_LIMIT,
+    OrderKind.ORDER_KIND_SELL_LIMIT: _TYPE_SELL_LIMIT,
+    OrderKind.ORDER_KIND_MARKET_BUY: _TYPE_BUY,
+    OrderKind.ORDER_KIND_MARKET_SELL: _TYPE_SELL,
+}
+
+#: The terminal's order type back to ours.
+_ORDER_TYPE: Final[dict[int, OrderKind]] = {
+    _TYPE_BUY_STOP: OrderKind.ORDER_KIND_BUY_STOP,
+    _TYPE_SELL_STOP: OrderKind.ORDER_KIND_SELL_STOP,
+    _TYPE_BUY_LIMIT: OrderKind.ORDER_KIND_BUY_LIMIT,
+    _TYPE_SELL_LIMIT: OrderKind.ORDER_KIND_SELL_LIMIT,
+    _TYPE_BUY: OrderKind.ORDER_KIND_MARKET_BUY,
+    _TYPE_SELL: OrderKind.ORDER_KIND_MARKET_SELL,
+}
+
+#: MetaTrader 5 truncates order and position comments at 31 characters.
+_COMMENT_LIMIT: Final[int] = 31
+
+#: ``ORDER_FILLING_FOK``: the order either fills completely at the requested price or not at
+#: all. For a pending stop, no partial state exists to reason about.
+_FILLING: Final[str] = "FOK"
+
+#: Zero tells the terminal "leave this level unchanged", which is what an omitted
+#: ``modify_position`` argument means.
+_UNSET_FLOAT: Final[float] = 0.0
+
+
+def encode_comment(client_tag: str, comment: str) -> str:
+    """Pack the identity tag and the human comment into the terminal's 31-char field.
+
+    MetaTrader 5 has no client-order-id field, so the comment is the only channel by which
+    identity survives the round trip -- and identity is what makes "did I already place
+    this?" answerable after a restart. The tag goes **first** and is never truncated,
+    because a tag that loses characters stops matching and duplicate protection silently
+    stops working; the prose is what gets cut.
+
+    The separator is a character the digest cannot contain, so decoding is unambiguous.
+    """
+    head = f"{client_tag}|"
+    if len(head) >= _COMMENT_LIMIT:
+        # Cannot happen with a 20-character blake2b digest, but a longer tag must fail
+        # loudly here rather than produce a comment that decodes to nothing.
+        raise BrokerError(
+            f"client tag {client_tag!r} leaves no room in the {_COMMENT_LIMIT}-character "
+            "terminal comment; identity would not survive the round trip"
+        )
+    return f"{head}{comment}"[:_COMMENT_LIMIT]
+
+
+def decode_comment(raw: str) -> tuple[str, str]:
+    """Inverse of :func:`encode_comment`. Returns ``(client_tag, comment)``."""
+    if "|" not in raw:
+        return "", raw
+    tag, _, rest = raw.partition("|")
+    return tag, rest
+
+
+def _intent_record(intent: OrderIntent, ticket: int) -> OrderRecord:
+    """An :class:`OrderRecord` built from what we sent, before the terminal confirms it."""
+    return OrderRecord(
+        ticket=ticket,
+        client_tag=intent.client_tag,
+        symbol=intent.symbol,
+        kind=intent.kind,
+        volume=intent.volume,
+        entry=intent.entry,
+        stop_loss=intent.stop_loss,
+        take_profit=intent.take_profit,
+        magic_number=intent.magic_number,
+        comment=intent.comment,
+        placed_at=datetime.now(UTC),
+        expires_at=intent.expiration,
+    )
+
+
+def _order_from(row: Any, digits: int) -> OrderRecord:
+    comment = str(field(row, "comment", "") or "")
+    tag, prose = decode_comment(comment)
+    volume = Decimal(str(field(row, "volume_current", None) or field(row, "volume_initial", 0) or 0))
+    setup = int(field(row, "time_setup", 0) or 0)
+    expiration = int(field(row, "time_expiration", 0) or 0)
+    return OrderRecord(
+        ticket=int(field(row, "ticket", 0) or 0),
+        client_tag=tag,
+        symbol=str(field(row, "symbol", "") or ""),
+        kind=_ORDER_TYPE.get(int(field(row, "type", 0) or 0), OrderKind.ORDER_KIND_BUY_STOP),
+        volume=Volume.of(volume),
+        entry=Price.parse(str(field(row, "price_open", None) or field(row, "price", 0) or 0), digits),
+        stop_loss=_optional_price(field(row, "sl"), digits),
+        take_profit=_optional_price(field(row, "tp"), digits),
+        magic_number=int(field(row, "magic", 0) or 0),
+        comment=prose,
+        placed_at=epoch_to_datetime(setup) if setup else datetime.now(UTC),
+        expires_at=epoch_to_datetime(expiration) if expiration else None,
+    )
+
+
+def _position_from(row: Any, digits: int) -> PositionRecord:
+    comment = str(field(row, "comment", "") or "")
+    tag, prose = decode_comment(comment)
+    opened = int(field(row, "time", 0) or 0)
+    currency = str(field(row, "currency", "USD") or "USD")
+    return PositionRecord(
+        ticket=int(field(row, "ticket", 0) or 0),
+        symbol=str(field(row, "symbol", "") or ""),
+        side=Side.SIDE_BUY if int(field(row, "type", 0) or 0) == _TYPE_BUY else Side.SIDE_SELL,
+        volume=Volume.of(Decimal(str(field(row, "volume", 0) or 0))),
+        entry=Price.parse(str(field(row, "price_open", 0) or 0), digits),
+        stop_loss=_optional_price(field(row, "sl"), digits),
+        take_profit=_optional_price(field(row, "tp"), digits),
+        magic_number=int(field(row, "magic", 0) or 0),
+        comment=prose,
+        opened_at=epoch_to_datetime(opened) if opened else datetime.now(UTC),
+        profit=Money.of(Decimal(str(field(row, "profit", 0) or 0)), currency),
+        client_tag=tag,
+    )
+
+
+def _optional_price(value: Any, digits: int) -> Price | None:
+    """A stop or target the terminal reports as ``0`` means "none", not "at zero"."""
+    if value is None:
+        return None
+    raw = Decimal(str(value))
+    return None if raw == 0 else Price(raw, digits)

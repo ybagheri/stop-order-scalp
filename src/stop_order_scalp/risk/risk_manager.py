@@ -125,6 +125,16 @@ class RiskManager:
         return self._risk
 
     @property
+    def target_settings(self) -> TargetSettings:
+        """The target settings in force.
+
+        Exposed so a caller that re-assesses against live state -- the order manager does
+        exactly that -- uses the *same* settings the manager was built with, rather than
+        reconstructing defaults that could differ.
+        """
+        return self._target
+
+    @property
     def stop_provider(self) -> StopLossProvider:
         return self._stop_provider
 

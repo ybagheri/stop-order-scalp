@@ -107,6 +107,16 @@ class AccountReader(Protocol):
     def account(self) -> AccountSnapshot:
         """Current account. Raises :class:`BrokerNotConnectedError` if unreachable."""
 
+    def specification(self, symbol: str) -> SymbolSpecification:
+        """The instrument's broker-reported contract details.
+
+        Declared here rather than left to
+        :class:`~stop_order_scalp.domain.interfaces.MarketDataProvider` because the risk
+        engine needs the *broker's own* numbers -- tick size, tick value, contract size,
+        stops level -- and those come from the venue, not from a price series. Raises
+        :class:`~stop_order_scalp.domain.exceptions.SymbolNotFoundError` if unknown.
+        """
+
     def symbol_available(self, symbol: str) -> bool:
         """Whether the symbol is selected and trading is permitted."""
 

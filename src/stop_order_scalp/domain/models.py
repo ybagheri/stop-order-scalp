@@ -413,21 +413,19 @@ class OrderIntent:
             _require_offset_datetime(self.expiration, "expiration")
 
     @classmethod
-    def from_plan(
-        cls,
-        plan: TradePlan,
-        *,
-        magic_number: int,
-        deviation_points: int,
-        expiration: datetime | None = None,
-    ) -> OrderIntent:
-        """Derive the intent, giving the client tag its deterministic identity.
+    def client_tag_for(cls, plan: TradePlan) -> str:
+        """The deterministic identity tag an intent for ``plan`` would carry.
 
-        The tag binds the plan id to the candle that authorised it. Two different
-        evaluations of the same still-open candle produce the same tag and are therefore
-        recognisably the same order; an evaluation of a *new* candle produces a different
-        tag, which is what tells the reconciler that a stale pending order must be
-        replaced rather than adopted.
+        Public, and the *only* place the tag is derived. The duplicate check in
+        :mod:`stop_order_scalp.execution.order_manager` asks this question before every
+        send, and a second implementation of the same derivation would eventually disagree
+        with the one that builds the order -- at which point duplicate protection silently
+        stops matching.
+
+        The tag binds the plan id to the candle that authorised it. Two evaluations of the
+        same still-open candle produce the same tag and are therefore recognisably the same
+        order; an evaluation of a *new* candle produces a different tag, which is what tells
+        the reconciler that a stale pending order must be replaced rather than adopted.
         """
         signal = plan.signal
         tag_source = (
@@ -436,9 +434,22 @@ class OrderIntent:
             f"|{signal.timeframe}@{int(signal.source_candle_open_time.timestamp())}"
             f"|{signal.side}"
         )
+        return _short_digest(tag_source)
+
+    @classmethod
+    def from_plan(
+        cls,
+        plan: TradePlan,
+        *,
+        magic_number: int,
+        deviation_points: int,
+        expiration: datetime | None = None,
+    ) -> OrderIntent:
+        """Derive the intent, giving the client tag its deterministic identity."""
+        signal = plan.signal
         return cls(
             plan_id=plan.plan_id,
-            client_tag=_short_digest(tag_source),
+            client_tag=cls.client_tag_for(plan),
             symbol=plan.symbol,
             kind=signal.order_kind,
             volume=plan.volume,

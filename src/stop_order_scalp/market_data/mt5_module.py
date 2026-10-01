@@ -133,6 +133,28 @@ class MT5Api(Protocol):
 
     def time_current(self) -> int: ...
 
+    # --- execution surface -----------------------------------------------
+    #
+    # Phase 5 added these. They are declared here rather than in the execution layer for
+    # one reason: this module is *the* description of the dependency on the terminal, and a
+    # second, private description in execution/mt5_broker.py would be a second thing to
+    # keep honest. Every call below goes through a keyword argument because that is how the
+    # real package takes them, so a positional mistake fails type checking here.
+
+    def order_send(self, request: dict[str, Any]) -> Any:
+        """Send a trade request. Returns a result row carrying ``retcode``."""
+
+    def order_get(self, *, ticket: int) -> Any:
+        """One working order by ticket, or ``None``."""
+
+    def orders_get(self, *, symbol: str | None = ...) -> Any:
+        """Working orders, optionally for one symbol."""
+
+    def positions_get(
+        self, *, symbol: str | None = ..., ticket: int | None = ...
+    ) -> Any:
+        """Open positions, optionally filtered by symbol and/or ticket."""
+
 
 # =============================================================================
 # Loading

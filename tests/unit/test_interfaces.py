@@ -156,6 +156,10 @@ class FakeBroker:
     def account(self) -> Any:
         return None
 
+    def specification(self, symbol: str) -> Any:
+        del symbol
+        raise NotImplementedError
+
     def symbol_available(self, symbol: str) -> bool:
         del symbol
         return True

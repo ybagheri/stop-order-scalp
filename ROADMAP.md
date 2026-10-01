@@ -329,19 +329,67 @@ handling is Phase 5's.
 
 ---
 
-## Phase 5 — Order Execution — `pending`
+## Phase 5 — Order Execution — `complete`
 
 Implement:
 
 * `execution/order_manager.py`: build, validate, place pending orders; **re-read broker
-  state before every send** (idempotency)
-* `execution/mt5_broker.py`: `Broker` protocol over the native MT5 API
-* `execution/simulated_broker.py`: full in-memory broker (dry-run, paper, backtest)
-* Magic number + comment + client tag strategy identity
-* Bounded exponential backoff for safe reads; **no resend after an unknown send outcome**
-* Broker error classification (retryable vs terminal)
+  state before every send** (idempotency) — **done**
+* `execution/mt5_broker.py`: `Broker` protocol over the native MT5 API — **done**
+* `execution/simulated_broker.py`: full in-memory broker (dry-run, paper, backtest) — **done**
+* Magic number + comment + client tag strategy identity — **done**
+* Bounded exponential backoff for safe reads; **no resend after an unknown send outcome** —
+  **done**, `execution/retry.py`
+* Broker error classification (retryable vs terminal) — **done**, plus a third bucket for
+  the codes that mean neither
 
 Gate: execution tests including duplicate-prevention and rejection handling, commit, push.
+
+### Decisions taken
+
+1. **The retcode table has three buckets, not two.** "Retryable" versus "terminal" cannot
+   classify `10012` (timeout) or `10031` (connection lost), because the request may already
+   have reached the venue. Those become `ExecutionUnknownError`, which is never retryable; the
+   caller re-observes broker state. An **unrecognised** retcode is treated as unknown rather
+   than terminal — wrong pessimistically costs a re-read, wrong optimistically costs a
+   duplicate.
+2. **No layer retries a send.** Not the broker, not the manager, not `retry.py`.
+   `retry.py` re-raises `ExecutionUnknownError` immediately, so a placement mistakenly passed
+   in as a "read" cannot be ridden out. A test asserts both the attempt count and that no
+   sleep occurs.
+3. **The duplicate check runs last, immediately before the send.** The gate and risk checks
+   come first so a refused trade costs no broker round trip; the book read cannot then be
+   stale by the time it matters.
+4. **Duplicates match on the client tag, never on price.** A second implementation of the tag
+   derivation would eventually disagree with the one that builds the order, so the derivation
+   lives in exactly one place, `OrderIntent.client_tag_for(plan)`, and a test compares the two.
+5. **The identity tag is packed into the terminal's comment, tag first.** MT5 has no
+   client-order-id, and it truncates comments at 31 characters. A 20-character tag leaves
+   about ten for prose — a documented trade-off, and identity is worth more than prose.
+6. **`MT5Api` grew the four execution methods.** The dependency surface stays described in
+   one module rather than gaining a second, private description in the execution layer.
+   `AccountReader` likewise gained `specification()`, because the risk engine needs the
+   broker's own contract numbers.
+7. **A cancellation asks the book, not the retcode.** Its goal is that the order is not on the
+   book, so an ambiguous cancel response is resolved by re-reading rather than retried.
+8. **Floating P/L is gross; commission is charged once, at close.** Charging it in both places
+   would show less equity than a live account has.
+9. **`sleep()` moved into `infrastructure/clock.py`.** The architecture check already refused
+   `import time` elsewhere; making the one legal home explicit keeps retry testable without a
+   real wait.
+
+### Known limitation
+
+`OrderManager.place(settings=None)` skips the gate check. That is correct for `DRY_RUN` and
+`PAPER`, where the venue is the simulator, but it means a caller that hands it a real broker
+and omits `settings` would route orders ungated. Phase 7's composition root should make the
+environment explicit rather than optional. Not a defect in any current call path.
+
+### Not verified
+
+`MetaTrader5` is not installed on the development machine, so the wire values, the retcode
+table and the tag encoding have never met a real terminal. `test-connection` correctly exits 3
+with `package_installed: false`. No live order has been placed.
 
 ---
 

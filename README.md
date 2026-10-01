@@ -7,13 +7,13 @@
 > **Status: under active development.** See [`ROADMAP.md`](ROADMAP.md) for what exists
 > today and [`HANDOFF.md`](HANDOFF.md) for the state of the last completed phase.
 >
-> **Phases 1–4 complete** (foundation, market data, core strategy, risk engine). The
-> domain layer, configuration, logging, the MetaTrader 5 feed, the closed-candle freeze,
-> the M15/M1 baseline decision and the position sizer are implemented and tested — **683
-> tests, no broker required**. Of the seven CLI commands below, `validate-config` and
-> `test-connection` work; the rest exit **4** and say which phase has not landed. The
-> command surface is fixed ahead of its implementations on purpose, so the contract is
-> testable now.
+> **Phases 1–5 complete** (foundation, market data, core strategy, risk engine, order
+> execution). The domain layer, configuration, logging, the MetaTrader 5 feed, the
+> closed-candle freeze, the M15/M1 baseline decision, the position sizer and the idempotent
+> order manager are implemented and tested — **838 tests, no broker required**. Of the seven
+> CLI commands below, `validate-config` and `test-connection` work; the rest exit **4** and
+> say which phase has not landed. The command surface is fixed ahead of its implementations
+> on purpose, so the contract is testable now.
 >
 > **No profitability is claimed.** See [`docs/strategy/BASELINE.md`](docs/strategy/BASELINE.md).
 >
@@ -50,6 +50,7 @@ into the strategy, risk, or lifecycle code.
 | [`docs/architecture/`](docs/architecture/) | Architecture, decisions, audit |
 | [`docs/strategy/BASELINE.md`](docs/strategy/BASELINE.md) | The exact strategy rules |
 | [`docs/risk/`](docs/risk/) | Sizing, commission, SL/TP semantics |
+| [`docs/execution/`](docs/execution/) | Order identity, idempotency, error classification |
 | [`docs/mt5/`](docs/mt5/) | MT5 setup, symbol specifications, dry-run |
 | [`docs/testing/`](docs/testing/) | Test layout, property tests, how to run |
 | [`docs/operations/`](docs/operations/) | Deployment, troubleshooting, recovery |
@@ -101,7 +102,7 @@ Part of the contract, because a supervisor process depends on them.
 ## Development
 
 ```bash
-python -m pytest                             # 683 tests
+python -m pytest                             # 839 tests
 python -m ruff check .                       # lint
 python -m mypy                               # types, strict, src + tests
 python scripts/check_architecture.py         # architecture boundaries
@@ -209,9 +210,19 @@ sessions to server time, which is usually not UTC, so the local clock would be h
 and would look like a working strategy. `ServerClock` reads the terminal's own clock and
 reports when it has had to fall back. See [`docs/mt5/SETUP.md`](docs/mt5/SETUP.md) §4.
 
+**An ambiguous send is not a failed send.** MetaTrader 5 reports some failures as a code that
+means only "I cannot say" — a timeout, most obviously, where the request may already have
+reached the venue. Those become `ExecutionUnknownError` and are **never** retried; the only
+correct response is to re-read broker state and find out. Assuming otherwise and resending is
+how one order becomes two positions. Broker state is therefore re-read immediately before
+every send, and identity is a deterministic tag that survives the terminal's 31-character
+comment field, so duplicate detection still works after a restart. See
+[`docs/execution/EXECUTION.md`](docs/execution/EXECUTION.md).
+
 See [`docs/architecture/ARCHITECTURE.md`](docs/architecture/ARCHITECTURE.md),
-[`docs/strategy/ENTRY_RULES.md`](docs/strategy/ENTRY_RULES.md) and
-[`docs/risk/RISK_MODEL.md`](docs/risk/RISK_MODEL.md).
+[`docs/strategy/ENTRY_RULES.md`](docs/strategy/ENTRY_RULES.md),
+[`docs/risk/RISK_MODEL.md`](docs/risk/RISK_MODEL.md) and
+[`docs/execution/EXECUTION.md`](docs/execution/EXECUTION.md).
 
 ## Contributing
 

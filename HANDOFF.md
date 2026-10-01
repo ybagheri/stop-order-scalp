@@ -10,9 +10,9 @@
 
 ## Current Phase
 
-**Phase 4 — Risk Engine — COMPLETE and green.**
+**Phase 5 — Order Execution — COMPLETE and green.**
 
-Next phase to execute: **Phase 5 — Order Execution.**
+Next phase to execute: **Phase 6 — Position Management.**
 
 ---
 
@@ -90,6 +90,33 @@ table.
 * 140 tests in `tests/risk/`, including **total risk never exceeds the budget** as a
   `hypothesis` property.
 
+### Phase 5 — Order Execution
+
+* `execution/gates.py` — `OrderGate`, `CloseGate`, `LiveInterlock`, and
+  `describe_safety` / `require_configured`. Both gates default to **closed**; `LIVE` needs
+  three independent switches and any two are not enough.
+* `execution/order_manager.py` — idempotent placement. Refusals are **values**
+  (`PlacementOutcome`, `RefusalCode`), not exceptions, because refusing a duplicate is
+  correct behaviour that happens routinely.
+* `execution/mt5_broker.py` — the native MT5 `Broker`, `classify()`, and the comment
+  encode/decode that carries the identity tag through a 31-character field.
+* `execution/simulated_broker.py` — the in-memory venue: real bid/ask, pending stops, SL/TP
+  settlement, magic numbers, commission. Not a test double; it is what `DRY_RUN` runs on.
+* `execution/retry.py` — bounded exponential backoff for **safe reads only**.
+* `docs/execution/README.md` and `docs/execution/EXECUTION.md`.
+* 145 tests in `tests/execution/`, including the two headline properties: *the same plan
+  placed twice yields one order*, and *an unknown send outcome is never resent*.
+
+### The property Phase 6 must preserve
+
+`ExecutionUnknownError` is **never** retryable, anywhere. `retry.py` re-raises it
+immediately rather than riding it out, precisely so that a placement mistakenly passed in as a
+read cannot be resent. Any new code in Phase 6 that loops over broker calls must keep that
+branch, and any new send path — break-even modification, trailing modification, close — must
+classify its retcode the same way `place_order` does. A stop that moved is still an
+account-changing operation; an ambiguous outcome there is a stop that may or may not have
+moved.
+
 ## Files Added
 
 ```
@@ -105,6 +132,8 @@ docs/mt5/SYMBOL_SPECIFICATIONS.md
 docs/testing/README.md
 docs/operations/README.md
 docs/research/README.md
+docs/execution/README.md
+docs/execution/EXECUTION.md
 src/stop_order_scalp/market_data/candles.py
 src/stop_order_scalp/market_data/mt5_module.py
 src/stop_order_scalp/market_data/mt5_feed.py
@@ -117,6 +146,11 @@ src/stop_order_scalp/risk/position_sizer.py
 src/stop_order_scalp/risk/stop_loss.py
 src/stop_order_scalp/risk/take_profit.py
 src/stop_order_scalp/risk/risk_manager.py
+src/stop_order_scalp/execution/gates.py
+src/stop_order_scalp/execution/order_manager.py
+src/stop_order_scalp/execution/mt5_broker.py
+src/stop_order_scalp/execution/simulated_broker.py
+src/stop_order_scalp/execution/retry.py
 tests/strategy/conftest.py
 tests/strategy/test_candle_direction.py
 tests/strategy/test_entry_rules.py
@@ -127,6 +161,13 @@ tests/risk/test_commission.py
 tests/risk/test_position_sizer.py
 tests/risk/test_risk_manager.py
 tests/risk/test_stop_loss_take_profit.py
+tests/execution/conftest.py
+tests/execution/test_gates.py
+tests/execution/test_order_manager.py
+tests/execution/test_mt5_broker.py
+tests/execution/test_mt5_classification.py
+tests/execution/test_simulated_broker.py
+tests/execution/test_retry.py
 tests/unit/test_architecture.py
 tests/unit/test_cli.py
 tests/unit/test_interfaces.py
@@ -135,6 +176,23 @@ tests/unit/test_mt5.py
 ```
 
 ## Files Modified
+
+Phase 5:
+
+```
+src/stop_order_scalp/domain/models.py       OrderIntent.client_tag_for() -- the single
+                                           place the identity tag is derived
+src/stop_order_scalp/domain/interfaces.py   AccountReader gained specification(); the risk
+                                           engine needs the broker's own contract numbers
+src/stop_order_scalp/market_data/mt5_module.py  MT5Api gained order_send/order_get/
+                                           orders_get/positions_get
+src/stop_order_scalp/infrastructure/clock.py    sleep() added, so import time has one home
+src/stop_order_scalp/risk/risk_manager.py   risk_settings/target_settings exposed
+tests/unit/test_mt5.py                      FakeTerminal grew the execution surface
+tests/unit/test_interfaces.py               FakeBroker grew specification()
+docs/execution/*                            new
+ROADMAP.md, README.md, docs/architecture/ARCHITECTURE.md, CHANGELOG.md
+```
 
 Phase 4:
 
@@ -195,27 +253,33 @@ tests/conftest.py, tests/unit/*.py            annotations, hermetic .env
 
 ## Tests
 
-683 passing, 1 skipped.
+838 passing, 1 skipped.
 
 | File | Tests |
 | --- | --- |
-| `tests/unit/test_mt5.py` | 72 |
-| `tests/unit/test_interfaces.py` | 62 |
+| `tests/unit/test_interfaces.py` | 96 |
+| `tests/unit/test_mt5.py` | 80 |
 | `tests/unit/test_config.py` | 55 |
+| `tests/risk/test_position_sizer.py` | 50 |
 | `tests/unit/test_value_objects.py` | 46 |
-| `tests/unit/test_candles.py` | 43 |
+| `tests/unit/test_candles.py` | 45 |
+| `tests/execution/test_mt5_classification.py` | 42 |
+| `tests/risk/test_stop_loss_take_profit.py` | 39 |
 | `tests/strategy/test_signal.py` | 37 |
-| `tests/unit/test_architecture.py` | 34 |
+| `tests/unit/test_architecture.py` | 35 |
+| `tests/execution/test_mt5_broker.py` | 34 |
 | `tests/strategy/test_candle_direction.py` | 33 |
+| `tests/risk/test_risk_manager.py` | 30 |
 | `tests/unit/test_timeframes.py` | 27 |
+| `tests/execution/test_simulated_broker.py` | 26 |
+| `tests/unit/test_cli.py` | 26 |
 | `tests/strategy/test_entry_rules.py` | 25 |
-| `tests/unit/test_cli.py` | 25 |
 | `tests/unit/test_logging.py` | 25 |
 | `tests/strategy/test_strategy.py` | 24 |
-| `tests/risk/test_position_sizer.py` | 50 |
-| `tests/risk/test_stop_loss_take_profit.py` | 41 |
-| `tests/risk/test_commission.py` | 30 |
-| `tests/risk/test_risk_manager.py` | 19 |
+| `tests/risk/test_commission.py` | 21 |
+| `tests/execution/test_gates.py` | 19 |
+| `tests/execution/test_order_manager.py` | 13 |
+| `tests/execution/test_retry.py` | 11 |
 
 The single skip is the `albrooks` cross-check of `freeze_closed_bars`, which needs the
 optional extra. It is the only skip in the suite, and is acceptable only because that extra
@@ -224,17 +288,17 @@ is genuinely optional.
 ## Test Results
 
 ```
-python -m pytest                             683 passed, 1 skipped
+python -m pytest                             838 passed, 1 skipped
 python -m ruff check .                       All checks passed!
-python -m mypy                               Success: no issues found in 62 source files
-python scripts/check_architecture.py         architecture OK: 38 modules checked
+python -m mypy                               Success: no issues found in 75 source files
+python scripts/check_architecture.py         architecture OK: 43 modules checked
 python -m stop_order_scalp validate-config   exit 0
 python -m stop_order_scalp test-connection   exit 3, reports package_installed: false
 ```
 
 ## Git Commit
 
-`feat(risk): position sizing, commission, SL/TP providers, and rejection codes`
+`feat(execution): idempotent order placement, retcode classification, and no-resend-on-unknown`
 
 ## Git Push
 

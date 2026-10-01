@@ -19,12 +19,27 @@ from __future__ import annotations
 
 from datetime import UTC, datetime, timedelta
 
-__all__ = ["FixedClock", "SystemClock", "utc_now"]
+__all__ = ["FixedClock", "SystemClock", "sleep", "utc_now"]
 
 
 def utc_now() -> datetime:
     """Timezone-aware current UTC time."""
     return datetime.now(UTC)
+
+
+def sleep(seconds: float) -> None:
+    """Block for ``seconds``.
+
+    Lives here so that ``import time`` appears in exactly one module. The architecture check
+    refuses it anywhere else, which is what makes "no sleeping in the trading pipeline" a
+    structural rule rather than a code-review habit -- a test injects its own recorder
+    instead, and :mod:`stop_order_scalp.execution.retry` takes it as a parameter.
+    """
+    if seconds < 0:
+        raise ValueError(f"cannot sleep for a negative duration, got {seconds}")
+    import time
+
+    time.sleep(seconds)
 
 
 class SystemClock:
