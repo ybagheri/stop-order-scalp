@@ -35,7 +35,14 @@ from stop_order_scalp.domain.enums import Environment
 from stop_order_scalp.domain.exceptions import ConfigError
 from stop_order_scalp.domain.models import EnvironmentSettings
 
-__all__ = ["CloseGate", "Gate", "GateDecision", "GateRefusal", "OrderGate"]
+__all__ = [
+    "CloseGate",
+    "Gate",
+    "GateDecision",
+    "GateRefusal",
+    "OrderGate",
+    "SimulatedGate",
+]
 
 
 class GateRefusal:
@@ -244,6 +251,41 @@ class LiveInterlock:
 
     def __str__(self) -> str:
         return f"LiveInterlock({self.environment}, allow_live={self.allow_live})"
+
+
+@dataclass(frozen=True, slots=True)
+class SimulatedGate:
+    """The gate for a venue that cannot lose money: ``DRY_RUN`` and ``PAPER``.
+
+    The deliberate mirror image of :class:`OrderGate`. A simulated venue needs no opt-in
+    because nothing is at stake, but it is **not** simply an open gate: it refuses ``LIVE``,
+    so a composition mistake that wires this to a real broker fails closed instead of trading.
+
+    Having both gates means the venue decides its gate at construction, and the caller cannot
+    forget to ask. That removes the possibility of an omitted ``settings`` argument quietly
+    skipping the check, which is the failure mode this exists to prevent.
+    """
+
+    @property
+    def enabled(self) -> bool:
+        """Always true. Satisfies the shared :class:`Gate` protocol so a manager can hold
+        either gate, and reported honestly: a simulated venue is never closed."""
+        return True
+
+    def check(self, settings: EnvironmentSettings) -> GateDecision:
+        if settings.environment is Environment.LIVE:
+            return refusal(
+                GateRefusal.NOT_LIVE,
+                "a simulated gate refuses LIVE; a real venue needs OrderGate and its three "
+                "independent switches. Refusing rather than trading on one flag.",
+            )
+        return OPEN
+
+    def require(self, settings: EnvironmentSettings) -> None:
+        self.check(settings).require()
+
+    def __str__(self) -> str:
+        return "SimulatedGate()"
 
 
 def describe_safety(settings: EnvironmentSettings, order: OrderGate, close: CloseGate) -> str:

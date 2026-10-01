@@ -17,6 +17,7 @@ from __future__ import annotations
 from datetime import timedelta
 from decimal import Decimal
 
+from stop_order_scalp.domain.enums import Environment
 from stop_order_scalp.domain.models import (
     AccountSnapshot,
     EnvironmentSettings,
@@ -29,15 +30,22 @@ from stop_order_scalp.execution.order_manager import OrderManager, RefusalCode
 from stop_order_scalp.execution.simulated_broker import SimulatedBroker
 from stop_order_scalp.risk.risk_manager import RiskManager, RiskRequest
 
+#: The environment passed to every ``place`` call below.
+#:
+#: A module constant rather than a fixture, because ``EnvironmentSettings`` is frozen and
+#: carries no per-test state -- and because ``place()`` now requires the environment to be
+#: stated explicitly, which is what stops a real broker being driven ungated.
+DRY_RUN = EnvironmentSettings(environment=Environment.DRY_RUN)
+
 
 class TestDuplicatePrevention:
     def test_the_same_plan_placed_twice_produces_one_order(
         self, manager: OrderManager, broker: SimulatedBroker, plan: TradePlan
     ) -> None:
-        first = manager.place(broker, plan)
+        first = manager.place(broker, plan, settings=DRY_RUN)
         assert first.placed
 
-        second = manager.place(broker, plan)
+        second = manager.place(broker, plan, settings=DRY_RUN)
 
         assert second.refused
         assert second.code == RefusalCode.DUPLICATE_ORDER
@@ -51,7 +59,7 @@ class TestDuplicatePrevention:
         If these two derivations ever disagreed, duplicate protection would silently stop
         matching -- so the test compares them rather than trusting either.
         """
-        manager.place(broker, plan)
+        manager.place(broker, plan, settings=DRY_RUN)
         resting = broker.orders()[0]
 
         assert resting.client_tag == OrderIntent.client_tag_for(plan)
@@ -91,22 +99,22 @@ class TestDuplicatePrevention:
                 target=risk_manager.target_settings,
             )
         )
-        manager.place(broker, plan)
+        manager.place(broker, plan, settings=DRY_RUN)
 
         assert not manager.is_duplicate(broker, next_plan)
-        assert manager.place(broker, next_plan).placed
+        assert manager.place(broker, next_plan, settings=DRY_RUN).placed
         assert len(broker.orders()) == 2
 
     def test_a_cancelled_order_does_not_block_a_replacement(
         self, manager: OrderManager, broker: SimulatedBroker, plan: TradePlan
     ) -> None:
         """Only *active* orders count. A cancelled one is gone."""
-        placed = manager.place(broker, plan)
+        placed = manager.place(broker, plan, settings=DRY_RUN)
         ticket = placed.require_order().ticket
         broker.cancel_order(ticket)
 
         assert not manager.is_duplicate(broker, plan)
-        assert manager.place(broker, plan).placed
+        assert manager.place(broker, plan, settings=DRY_RUN).placed
 
 
 class TestAlreadyInPosition:
@@ -118,12 +126,12 @@ class TestAlreadyInPosition:
         Filling the pending order makes it a position, and the order is no longer on the
         book -- so without this check the next tick would place a second order.
         """
-        manager.place(broker, plan)
+        manager.place(broker, plan, settings=DRY_RUN)
         # Drive price through the pending stop so it fills into a position.
         broker.publish("US30", Decimal("40010.0"), Decimal("40010.5"), digits=1)
 
         assert broker.positions()
-        outcome = manager.place(broker, plan)
+        outcome = manager.place(broker, plan, settings=DRY_RUN)
 
         assert outcome.refused
         assert outcome.code == RefusalCode.ALREADY_IN_POSITION
@@ -137,7 +145,7 @@ class TestUnknownOutcome:
     ) -> None:
         broker.fail_next_send(outcome="unknown")
 
-        outcome = manager.place(broker, plan)
+        outcome = manager.place(broker, plan, settings=DRY_RUN)
 
         assert outcome.refused
         assert outcome.code == "execution_unknown"
@@ -150,7 +158,7 @@ class TestUnknownOutcome:
     ) -> None:
         """Re-reading the book is what resolves the ambiguity, so it has to find the order."""
         broker.fail_next_send(outcome="unknown")
-        manager.place(broker, plan)
+        manager.place(broker, plan, settings=DRY_RUN)
 
         resting = broker.orders()
 
@@ -166,10 +174,10 @@ class TestUnknownOutcome:
         creating a real duplicate.
         """
         broker.fail_next_send(outcome="unknown")
-        assert manager.place(broker, plan).refused
+        assert manager.place(broker, plan, settings=DRY_RUN).refused
 
         # Next cycle: the manager re-reads the book first.
-        second = manager.place(broker, plan)
+        second = manager.place(broker, plan, settings=DRY_RUN)
 
         assert second.refused
         assert second.code == RefusalCode.DUPLICATE_ORDER
@@ -181,11 +189,11 @@ class TestUnknownOutcome:
     ) -> None:
         """Armed failures do not accumulate; the venue recovers."""
         broker.fail_next_send(outcome="unknown")
-        manager.place(broker, plan)
+        manager.place(broker, plan, settings=DRY_RUN)
 
         assert len(broker.send_attempts) == 1
         broker.cancel_order(broker.orders()[0].ticket)
-        assert manager.place(broker, plan).placed
+        assert manager.place(broker, plan, settings=DRY_RUN).placed
 
 
 class TestGateIntegration:
@@ -234,7 +242,7 @@ class TestRiskIntegration:
 
         rejected = RiskAssessment.reject("stale_signal", "the signal is no longer valid")
 
-        outcome = manager.place(broker, plan, assessment=rejected)
+        outcome = manager.place(broker, plan, settings=DRY_RUN, assessment=rejected)
 
         assert outcome.refused
         assert outcome.code == RefusalCode.NOT_ASSESSED

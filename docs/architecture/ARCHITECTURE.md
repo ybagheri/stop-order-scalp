@@ -73,8 +73,12 @@ from the outside arrives as an argument.
 | `execution/position_manager.py` | 6 | Complete — break-even then trailing, one request per change |
 | `trailing/break_even.py` | 6 | Complete — trigger, commission-aware target, broker limits |
 | `trailing/trailing_stop.py` | 6 | Complete — `bid − d` / `ask + d`, monotonic, minimum step |
+| `infrastructure/persistence.py` | 7 | Complete — the write-intent ledger: atomic, refuses to overwrite, never starts fresh |
+| `lifecycle/state_machine.py` | 7 | Complete — the transition table, the machine, and listeners |
+| `lifecycle/recovery.py` | 7 | Complete — reconcile local state against the broker's book |
+| `lifecycle/trade_lifecycle.py` | 7 | Complete — the loop, and the four-step placement ordering |
 | `cli/main.py` | 1/2 | Contract complete; `validate-config` and `test-connection` implemented |
-| `lifecycle/`, `application/`, `backtest/`, `research/`, `integrations/` | 7–12 | Empty packages, present so the boundary is real from day one |
+| `application/`, `backtest/`, `research/`, `integrations/` | 8–12 | Empty packages, present so the boundary is real from day one |
 
 ## 4. The protocols
 
@@ -178,6 +182,33 @@ Two related decisions worth knowing:
   may be placed, the second whether an existing position may be modified at all.
 
 See [`docs/trailing/TRAILING_MODEL.md`](../trailing/TRAILING_MODEL.md).
+
+## 4c. An intent is written before it is sent
+
+Every order is recorded in a durable ledger **before** the send that could create it, and the
+ledger entry is settled after. That ordering closes the window a crash would otherwise open: if
+the process dies at any point, recovery finds an intent whose outcome is unknown and knows to
+ask the broker. There is no interval in which an order could exist at the venue and be unknown
+locally.
+
+Three consequences worth stating, because each is a decision rather than an implementation
+detail:
+
+* **The ledger never "starts fresh".** An unreadable state file raises rather than yielding an
+  empty one, because an empty ledger is the condition under which duplicate orders appear. An
+  *absent* file is different — that is a genuine first run.
+* **Recording refuses to overwrite.** Two intents with one client tag means the tag derivation
+  has regressed; keeping only the second would discard the record that explains the duplicate.
+* **`VERIFYING` cannot reach a placement.** The state exists because a send's outcome is
+  unknown, and it may only be left after broker state has been read. Asserted as a property of
+  the transition table rather than as a code path.
+
+The broker is authoritative on restart, and the reconciler is **read-only by construction** — it
+calls only `positions` and `orders`, so it is safe to run before any gate is open. What stops
+the system is *unattributable* exposure: a position or working order whose identity matches no
+ledger entry.
+
+See [`docs/lifecycle/LIFECYCLE.md`](../lifecycle/LIFECYCLE.md).
 
 ## 5. Numbers are `Decimal`
 

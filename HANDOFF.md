@@ -10,9 +10,9 @@
 
 ## Current Phase
 
-**Phase 6 — Position Management — COMPLETE and green.**
+**Phase 7 — Lifecycle and Recovery — COMPLETE and green.**
 
-Next phase to execute: **Phase 7 — Lifecycle and Recovery.**
+Next phase to execute: **Phase 8 — Al Brooks Integration** (optional, disabled by default).
 
 ---
 
@@ -116,7 +116,9 @@ table.
   SELL, on the tick grid, with `min_step_points` for idempotency.
 * `execution/position_manager.py` — break-even then trailing, one `modify_position` per real
   change, `ActionKind` and `PositionAction` as the journal-facing vocabulary.
-* `docs/trailing/README.md` and `docs/trailing/TRAILING_MODEL.md`.
+* `docs/trailing/README.md` and `docs/trailing/TRAILING_MODEL.md
+docs/lifecycle/README.md
+docs/lifecycle/LIFECYCLE.md`.
 * 87 tests in `tests/trailing/`, including monotonicity proved over `hypothesis` walks **and**
   adversarial run-up-then-reversal paths.
 
@@ -133,12 +135,46 @@ Three invariants, each of which a phase-7 loop could plausibly break:
 3. **An ordinary tick must cost no broker write.** Both providers are idempotent; do not add a
    path that re-proposes a level already in place.
 
-### Carried into Phase 7
+### Carried into Phase 7 — both now closed
 
-`PositionManager` has **no close detection**: it evaluates the positions it is handed and
-notices nothing about one the venue has closed. Phase 7 owns that, because it already owns
-"position closed → place a replacement" and has the state to distinguish a close from a
-disappearance.
+Two limitations were carried forward from Phases 5 and 6. Both are closed:
+
+* `OrderManager.place(settings=None)` skipped the gate. **Closed**: `settings` is now a
+  required keyword argument, and which gate applies is decided once at construction by the
+  venue — `OrderGate` for real, the new `SimulatedGate` for simulated. `SimulatedGate` refuses
+  `LIVE`, so a composition mistake wiring it to a real broker fails closed.
+* `PositionManager` had no close detection. **Closed**: `TradeLifecycle._detect_closes`
+  compares the book against the last observation, and Phase 7 owns the replacement path.
+
+### Phase 7 — Lifecycle and Recovery
+
+* `infrastructure/persistence.py` — `StateLedger`, `LedgerEntry`, `atomic_write_json`.
+  Write-intent-before-act, atomic replace with `fsync`, refuse-to-overwrite, never start fresh.
+* `lifecycle/state_machine.py` — `TRANSITIONS`, `LifecycleMachine`, `TransitionListener`,
+  `describe_table`. The reachable set is data, so it is printed, reviewed and asserted.
+* `lifecycle/recovery.py` — `Reconciler`, `Reconciliation`, `settled_intents`. Read-only by
+  construction, so it is safe to run at startup before any gate is open.
+* `lifecycle/trade_lifecycle.py` — `TradeLifecycle`, `LifecycleStep`. The loop, plus the
+  four-step placement ordering.
+* `docs/lifecycle/README.md` and `docs/lifecycle/LIFECYCLE.md`.
+* 140 tests across `tests/unit/test_persistence.py`, `test_state_machine.py`,
+  `test_recovery.py` and `test_trade_lifecycle.py`.
+
+### What Phase 8 must preserve
+
+Four invariants, each of which a later phase could plausibly break by adding a new send path:
+
+1. **Any new write goes through `place_order`'s ordering** — gate, record, re-read, send once,
+   settle. A new account-changing operation (Phase 8's adapter reaches no broker, but a future
+   exit or re-entry would) needs the ledger write before its send, or the crash window reopens.
+2. **`VERIFYING` must never reach a placement without a broker read.** If a state is added,
+   check that it cannot reach `PENDING_ORDER_PLACED` without passing through `VERIFYING` or
+   `RECONCILING`.
+3. **Unresolved *and* unknown intents are both re-observed.** `awaiting_confirmation()` is the
+   query; `unresolved()` alone is not enough, and using it leaves `VERIFYING` with nothing to
+   verify.
+4. **The gate is chosen by the venue and the environment is always passed.** Any new entry
+   point must take `settings` explicitly rather than defaulting it.
 
 `ExecutionUnknownError` is **never** retryable, anywhere. `retry.py` re-raises it
 immediately rather than riding it out, precisely so that a placement mistakenly passed in as a
@@ -167,6 +203,8 @@ docs/execution/README.md
 docs/execution/EXECUTION.md
 docs/trailing/README.md
 docs/trailing/TRAILING_MODEL.md
+docs/lifecycle/README.md
+docs/lifecycle/LIFECYCLE.md
 src/stop_order_scalp/market_data/candles.py
 src/stop_order_scalp/market_data/mt5_module.py
 src/stop_order_scalp/market_data/mt5_feed.py
@@ -187,6 +225,10 @@ src/stop_order_scalp/execution/retry.py
 src/stop_order_scalp/execution/position_manager.py
 src/stop_order_scalp/trailing/break_even.py
 src/stop_order_scalp/trailing/trailing_stop.py
+src/stop_order_scalp/infrastructure/persistence.py
+src/stop_order_scalp/lifecycle/state_machine.py
+src/stop_order_scalp/lifecycle/recovery.py
+src/stop_order_scalp/lifecycle/trade_lifecycle.py
 tests/strategy/conftest.py
 tests/strategy/test_candle_direction.py
 tests/strategy/test_entry_rules.py
@@ -209,6 +251,10 @@ tests/trailing/test_break_even.py
 tests/trailing/test_trailing_stop.py
 tests/trailing/test_position_manager.py
 tests/trailing/test_property_monotonic.py
+tests/unit/test_persistence.py
+tests/unit/test_state_machine.py
+tests/unit/test_recovery.py
+tests/unit/test_trade_lifecycle.py
 tests/unit/test_architecture.py
 tests/unit/test_cli.py
 tests/unit/test_interfaces.py
@@ -217,6 +263,20 @@ tests/unit/test_mt5.py
 ```
 
 ## Files Modified
+
+Phase 7:
+
+```
+src/stop_order_scalp/execution/gates.py        SimulatedGate added -- open for DRY_RUN/PAPER,
+                                               refuses LIVE so it fails closed if miswired
+src/stop_order_scalp/execution/order_manager.py place() now REQUIRES settings; gate typed to the
+                                               Gate protocol and chosen at construction
+src/stop_order_scalp/domain/interfaces.py       unchanged
+tests/execution/conftest.py                    the manager fixture names its gate
+docs/lifecycle/*                               new
+ROADMAP.md, HANDOFF.md, README.md, README.fa.md, docs/architecture/ARCHITECTURE.md,
+CHANGELOG.md, docs/testing/README.md
+```
 
 Phase 6:
 
@@ -303,35 +363,43 @@ tests/conftest.py, tests/unit/*.py            annotations, hermetic .env
 
 ## Tests
 
-931 passing, 1 skipped.
+1082 passing, 1 skipped.
 
 | File | Tests |
 | --- | --- |
-| `tests/unit/test_interfaces.py` | 102 |
+| `tests/unit/test_interfaces.py` | 108 |
 | `tests/unit/test_mt5.py` | 80 |
 | `tests/unit/test_config.py` | 55 |
 | `tests/risk/test_position_sizer.py` | 50 |
 | `tests/unit/test_value_objects.py` | 46 |
 | `tests/unit/test_candles.py` | 45 |
+| `tests/unit/test_state_machine.py` | 44 |
 | `tests/execution/test_mt5_classification.py` | 42 |
 | `tests/risk/test_stop_loss_take_profit.py` | 39 |
 | `tests/strategy/test_signal.py` | 37 |
+| `tests/unit/test_trade_lifecycle.py` | 36 |
 | `tests/unit/test_architecture.py` | 35 |
 | `tests/execution/test_mt5_broker.py` | 34 |
+| `tests/unit/test_persistence.py` | 34 |
 | `tests/strategy/test_candle_direction.py` | 33 |
 | `tests/risk/test_risk_manager.py` | 30 |
 | `tests/trailing/test_position_manager.py` | 27 |
 | `tests/unit/test_timeframes.py` | 27 |
 | `tests/execution/test_simulated_broker.py` | 26 |
 | `tests/unit/test_cli.py` | 26 |
+| `tests/unit/test_recovery.py` | 26 |
 | `tests/strategy/test_entry_rules.py` | 25 |
 | `tests/unit/test_logging.py` | 25 |
 | `tests/trailing/test_break_even.py` | 24 |
 | `tests/strategy/test_strategy.py` | 24 |
 | `tests/trailing/test_trailing_stop.py` | 23 |
 | `tests/risk/test_commission.py` | 21 |
-| `tests/execution/test_gates.py` | 19 |
-| `tests/trailing/test_property_monotonic.py` | 13 |
+| `tests/execution/test_gates.py` | 24 |
+| `tests/trailing/test_property_monotonic.py
+tests/unit/test_persistence.py
+tests/unit/test_state_machine.py
+tests/unit/test_recovery.py
+tests/unit/test_trade_lifecycle.py` | 13 |
 | `tests/execution/test_order_manager.py` | 13 |
 | `tests/execution/test_retry.py` | 11 |
 
@@ -342,17 +410,17 @@ is genuinely optional.
 ## Test Results
 
 ```
-python -m pytest                             931 passed, 1 skipped
+python -m pytest                             1082 passed, 1 skipped
 python -m ruff check .                       All checks passed!
-python -m mypy                               Success: no issues found in 84 source files
-python scripts/check_architecture.py         architecture OK: 46 modules checked
+python -m mypy                               Success: no issues found in 92 source files
+python scripts/check_architecture.py         architecture OK: 50 modules checked
 python -m stop_order_scalp validate-config   exit 0
 python -m stop_order_scalp test-connection   exit 3, reports package_installed: false
 ```
 
 ## Git Commit
 
-`feat(trailing): break-even, monotonic trailing stop, and position management`
+`feat(lifecycle): write-intent ledger, transition table, and restart recovery`
 
 ## Git Push
 

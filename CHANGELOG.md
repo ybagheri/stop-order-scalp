@@ -9,6 +9,83 @@ project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Phase 7 — Lifecycle and Recovery
+
+#### Added
+
+- `infrastructure/persistence.py` — `StateLedger`, `LedgerEntry`, `IntentOutcome`,
+  `atomic_write_json`. The write-intent-before-act ledger: every order is recorded durably
+  *before* the send that could create it.
+- `lifecycle/state_machine.py` — `TRANSITIONS`, `LifecycleMachine`, `TransitionListener`,
+  `TransitionRecord`, `describe_table`. The reachable set is data, so it can be printed,
+  reviewed and asserted against.
+- `lifecycle/recovery.py` — `Reconciler`, `Reconciliation`, `ReconciliationCode`,
+  `settled_intents`. Restart recovery, with the broker authoritative.
+- `lifecycle/trade_lifecycle.py` — `TradeLifecycle`, `LifecycleStep`. The loop, with the
+  four-step placement ordering.
+- `execution/gates.py` — `SimulatedGate`, for a venue that cannot lose money but must still
+  refuse `LIVE`.
+- `docs/lifecycle/README.md` and `docs/lifecycle/LIFECYCLE.md`.
+- 140 tests across `tests/unit/test_persistence.py`, `test_state_machine.py`,
+  `test_recovery.py` and `test_trade_lifecycle.py`.
+
+#### Decisions
+
+- **The gate is chosen by the venue; the environment is always stated.** Phase 5's
+  `place(settings=None)` skipped the gate — right for `DRY_RUN`/`PAPER`, wrong for a caller
+  holding a real broker. `place()` now *requires* `settings`, and which gate applies is decided
+  once at construction. `SimulatedGate` is not an open gate: it refuses `LIVE`, so a
+  composition mistake wiring it to a real broker fails closed.
+- **`VERIFYING` cannot reach `VALIDATING`**, asserted as a property of the transition table.
+  Nothing may be sent from the state that exists *because* a send's outcome is unknown, until
+  broker state has been read.
+- **The ledger never starts fresh.** `load` raises on an unreadable ledger; an absent file is a
+  genuine first run and an unreadable one is a lost idempotency record, which are not the same
+  thing.
+- **`awaiting_confirmation()` is wider than `unresolved()`.** An ambiguous send is recorded
+  `UNKNOWN`, which *is* an outcome. Those entries are re-observed and **upgraded** to `placed`
+  when the broker confirms them — the one case where a recorded outcome may be replaced, and
+  it is safe because `unknown` is a statement of ignorance rather than a fact about the venue.
+- **A `placed` entry with an empty book is not a contradiction.** It is the ordinary
+  filled-then-closed case; treating it as one would halt the system on every take-profit after
+  every restart. What halts is **unattributable exposure**: a position or working order whose
+  identity matches no ledger entry.
+- **The replacement is the same code path as a first entry.** `_on_position_closed` journals and
+  stops; `POSITION_CLOSED` is quiet, so the next tick's decision is placed by the ordinary
+  `place_order` — same ledger write, same book re-read, same gate. Two paths would have to
+  agree; one cannot drift.
+- **Atomic writes use `os.replace` after `fsync`**, with the temp file in the target's
+  directory. A temp file on another volume would make the replace a copy, which is not atomic.
+- **The reconciler is read-only by construction** — it calls only `positions` and `orders` — so
+  it is safe to run at startup before any gate is open.
+
+#### Fixed
+
+- `TransitionListener` never inherited `Protocol`, making it a *nominal* base class. No
+  duck-typed listener could satisfy it — the type checker caught it.
+- The lifecycle recorded an intent and *then* asked the ledger whether it had been sent,
+  finding the entry it had just written and refusing every placement as a duplicate of itself.
+- `settled_intents` consulted only `unresolved()`, so an entry already recorded `UNKNOWN` was
+  never re-observed and `VERIFYING` had nothing to verify.
+- `_adopt_open_position` returned after the first reachable step, so it never reached
+  `POSITION_OPEN` from a resting state.
+- A recovery test failed because the contradiction rule fired on an ordinary filled-then-closed
+  order. The rule was wrong, not the test.
+- `StateLedger.load` returned `WAITING_FOR_SIGNAL` for a flat book only after inheriting
+  `STATE_IDLE`; idle means "not started", and a process that has just recovered has started.
+
+#### Known limitation
+
+`TradeLifecycle` has no clock of its own and requires one to be injected, refusing rather than
+falling back to `datetime.now()` — which the architecture gate forbids in this layer, and
+which would make ledger timestamps irreproducible in a replay.
+
+#### Not verified
+
+No order has been placed, so the ledger has never been written by a real crash. Atomicity and
+refuse-to-overwrite are proved against an injected `OSError`, not a power cut. `MetaTrader5` is
+not installed on the development machine.
+
 ### Phase 6 — Position Management
 
 #### Added

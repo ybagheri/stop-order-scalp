@@ -22,6 +22,7 @@ from stop_order_scalp.domain.models import (
 )
 from stop_order_scalp.domain.value_objects import Money, Price, SymbolSpecification
 from stop_order_scalp.execution import simulated_broker as venue
+from stop_order_scalp.execution.gates import SimulatedGate
 from stop_order_scalp.execution.order_manager import OrderManager
 from stop_order_scalp.execution.simulated_broker import SimulatedBroker
 from stop_order_scalp.infrastructure.clock import FixedClock
@@ -78,6 +79,16 @@ def configured_venue(us30: SymbolSpecification) -> SymbolSpecification:
 
 @pytest.fixture
 def dry_run_settings() -> EnvironmentSettings:
+    return EnvironmentSettings(environment=Environment.DRY_RUN)
+
+
+@pytest.fixture
+def dry_run() -> EnvironmentSettings:
+    """The same environment under the shorter name many call sites use.
+
+    A second fixture rather than an alias of the first, because a bare module-level name
+    would be the *undecorated* function, not a fixture, and pytest would not inject it.
+    """
     return EnvironmentSettings(environment=Environment.DRY_RUN)
 
 
@@ -154,4 +165,16 @@ def broker(dry_run_settings: EnvironmentSettings, configured_venue: SymbolSpecif
 
 @pytest.fixture
 def manager(risk_manager: RiskManager) -> OrderManager:
-    return OrderManager(ExecutionSettings(), OrderSettings(), risk_manager)
+    """A manager wired to a simulated venue.
+
+    ``SimulatedGate`` rather than ``OrderGate``: the venue is the simulated broker, so the
+    three-fold LIVE interlock does not apply, and ``DRY_RUN`` must still be able to place an
+    order. The gate is chosen once here rather than per call, which is why ``place()`` can
+    make ``settings`` a required argument.
+    """
+    return OrderManager(
+        ExecutionSettings(),
+        OrderSettings(),
+        risk_manager,
+        gate=SimulatedGate(),
+    )

@@ -40,7 +40,7 @@ from stop_order_scalp.domain.models import (
     RiskAssessment,
     TradePlan,
 )
-from stop_order_scalp.execution.gates import GateDecision, LiveInterlock, OrderGate
+from stop_order_scalp.execution.gates import Gate, LiveInterlock, OrderGate
 from stop_order_scalp.infrastructure.config import (
     ExecutionSettings,
     OrderSettings,
@@ -121,17 +121,20 @@ class OrderManager:
         orders: OrderSettings,
         risk_manager: RiskManager,
         *,
-        gate: OrderGate | None = None,
+        gate: Gate | None = None,
         interlock: LiveInterlock | None = None,
     ) -> None:
         self._execution = execution
         self._orders = orders
         self._risk = risk_manager
-        self._gate = gate if gate is not None else OrderGate()
+        # Defaults to the closed OrderGate, so a manager built without naming a gate cannot
+        # trade. Which gate is appropriate is a property of the *venue*, decided once here,
+        # which is what lets ``place`` require the environment on every call.
+        self._gate: Gate = gate if gate is not None else OrderGate()
         self._interlock = interlock if interlock is not None else LiveInterlock()
 
     @property
-    def gate(self) -> OrderGate:
+    def gate(self) -> Gate:
         return self._gate
 
     @property
@@ -179,6 +182,20 @@ class OrderManager:
         """Whether this strategy already holds a position in this symbol."""
         return bool(broker.positions(magic_number=self.magic_number, symbol=plan.symbol))
 
+    def has_tag(self, broker: Broker, client_tag: str) -> bool:
+        """Whether a working order with this exact identity already rests on the book.
+
+        :meth:`is_duplicate` answers "is *this plan* already placed?" and needs the plan.
+        Recovery asks a narrower question -- "is *this tag* on the book?" -- because after a
+        restart it has an identity in hand and no plan to rebuild. Two methods rather than one
+        taking a union, because reconstructing a plan from an intent would mean inventing the
+        money figures a plan carries, and the duplicate check reads none of them.
+        """
+        for order in broker.orders(magic_number=self.magic_number):
+            if order.is_active and order.client_tag == client_tag:
+                return True
+        return False
+
     # --- placement -------------------------------------------------------
 
     def place(
@@ -186,7 +203,7 @@ class OrderManager:
         broker: Broker,
         plan: TradePlan,
         *,
-        settings: EnvironmentSettings | None = None,
+        settings: EnvironmentSettings,
         assessment: RiskAssessment | None = None,
         now: datetime | None = None,
     ) -> PlacementOutcome:
@@ -196,11 +213,18 @@ class OrderManager:
         re-read last**, immediately before the send. Putting the cheap local checks first
         means an obviously-refused trade never costs a broker round trip; putting the broker
         read immediately before the send means it cannot be stale by the time it matters.
+
+        :param settings: **required, and not optional on purpose.** An earlier version took
+            ``settings=None`` and skipped the gate entirely, which was correct for
+            ``DRY_RUN`` and ``PAPER`` and wrong for everything else: a caller holding a real
+            broker and omitting the argument would route orders ungated. The environment is
+            now always stated, and *which* gate applies is decided once at construction --
+            :class:`~stop_order_scalp.execution.gates.OrderGate` for a real venue,
+            :class:`~stop_order_scalp.execution.gates.SimulatedGate` for a simulated one.
         """
-        if settings is not None:
-            decision: GateDecision = self._gate.check(settings)
-            if decision.refused:
-                return self._refuse(RefusalCode.GATE_CLOSED, decision.reason, decision.code)
+        decision = self._gate.check(settings)
+        if decision.refused:
+            return self._refuse(RefusalCode.GATE_CLOSED, decision.reason, decision.code)
 
         verdict = assessment if assessment is not None else self.assess(plan, broker)
         if not verdict.accepted:

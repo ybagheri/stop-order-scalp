@@ -16,9 +16,11 @@ from stop_order_scalp.execution.gates import (
     GateRefusal,
     LiveInterlock,
     OrderGate,
+    SimulatedGate,
     describe_safety,
     require_configured,
 )
+from stop_order_scalp.infrastructure.config import TargetSettings
 
 
 class TestDefaults:
@@ -115,6 +117,55 @@ class TestInterlock:
 
     def test_from_settings_mirrors_the_configuration(self, live_settings: EnvironmentSettings) -> None:
         assert LiveInterlock.from_settings(live_settings).live_reachable
+
+
+class TestSimulatedGate:
+    """The gate a simulated venue uses.
+
+    Not simply an open gate: it refuses ``LIVE``. That is what makes it safe to use as the
+    default in a test or a ``DRY_RUN``, because a composition mistake that wired it to a real
+    broker fails closed instead of trading.
+    """
+
+    def test_it_opens_for_dry_run(self, dry_run_settings: EnvironmentSettings) -> None:
+        assert SimulatedGate().check(dry_run_settings).open is True
+
+    def test_it_opens_for_paper(self) -> None:
+        settings = EnvironmentSettings(environment=Environment.PAPER)
+
+        assert SimulatedGate().check(settings).open is True
+
+    def test_it_refuses_live(self, live_settings: EnvironmentSettings) -> None:
+        """A real venue needs OrderGate and its three independent switches."""
+        decision = SimulatedGate().check(live_settings)
+
+        assert decision.refused
+        assert decision.code == GateRefusal.NOT_LIVE
+
+    def test_it_reports_itself_enabled(self) -> None:
+        """Required by the shared ``Gate`` protocol, and true rather than absent."""
+        assert SimulatedGate().enabled is True
+
+    def test_a_manager_defaulting_to_the_closed_gate_cannot_trade(
+        self, live_settings: EnvironmentSettings
+    ) -> None:
+        """The default must be closed, so an unwired manager refuses rather than trades."""
+        from stop_order_scalp.execution.order_manager import OrderManager
+        from stop_order_scalp.infrastructure.config import (
+            ExecutionSettings,
+            OrderSettings,
+            RiskSettings,
+        )
+        from stop_order_scalp.risk.risk_manager import RiskManager
+
+        manager = OrderManager(
+            ExecutionSettings(),
+            OrderSettings(),
+            RiskManager(RiskSettings(), TargetSettings()),
+        )
+
+        assert isinstance(manager.gate, OrderGate)
+        assert manager.gate.enabled is False
 
 
 class TestConfigurationConsistency:
