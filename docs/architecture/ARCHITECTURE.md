@@ -60,8 +60,13 @@ from the outside arrives as an argument.
 | `strategy/entry_rules.py` | 3 | Complete — BUY STOP / SELL STOP placement |
 | `strategy/signal.py` | 3 | Complete — `TradeDecision` or `NoTrade`, the instrument policy check |
 | `strategy/strategy.py` | 3 | Complete — the `StopOrderStrategy` façade |
+| `risk/commission.py` | 4 | Complete — round-trip versus per-side |
+| `risk/position_sizer.py` | 4 | Complete — `percent_balance` and `fixed_lot` |
+| `risk/stop_loss.py` | 4 | Complete — three stop providers |
+| `risk/take_profit.py` | 4 | Complete — three target providers and the precedence rule |
+| `risk/risk_manager.py` | 4 | Complete — sizing, validation, rejection codes |
 | `cli/main.py` | 1/2 | Contract complete; `validate-config` and `test-connection` implemented |
-| `risk/`, `trailing/`, `execution/`, `lifecycle/`, `application/`, `backtest/`, `research/`, `integrations/` | 4–12 | Empty packages, present so the boundary is real from day one |
+| `execution/`, `trailing/`, `lifecycle/`, `application/`, `backtest/`, `research/`, `integrations/` | 5–12 | Empty packages, present so the boundary is real from day one |
 
 ## 4. The protocols
 
@@ -94,6 +99,26 @@ An **instrument-policy refusal is the exception** to this: it raises, because re
 check means the configuration or the feed is wrong, and a run that silently declines to
 trade all day is the worst possible outcome — it looks like a strategy that simply is not
 triggering.
+
+## 4b. The risk engine refuses by code, not by prose
+
+`RiskAssessment` carries a **stable rejection code** alongside its reason. A refusal that
+only says "too risky" forces every caller to parse English; a code can be counted, alerted
+on and compared across runs. That is the difference between "the engine rejected 12 % of
+signals today" and "the engine rejected 12 signals, all `below_min_volume`".
+
+The codes in `risk/risk_manager.RejectionCode` are an interface — renaming one breaks every
+alert built on it, so one is added rather than one reworded.
+
+Two asymmetries worth knowing:
+
+* A budget too small for the broker's minimum volume is **refused**, not rounded up. A risk
+  limit that does not bind is not a limit.
+* A malformed **stop** refuses the trade; a malformed **target** falls back to the
+  configured one. The stop is what bounds risk, so a bad target must not block a trade that
+  is already safe.
+
+See [`docs/risk/RISK_MODEL.md`](../risk/RISK_MODEL.md).
 
 ## 5. Numbers are `Decimal`
 

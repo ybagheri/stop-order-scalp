@@ -262,21 +262,70 @@ tick grid, so this is a correctness guarantee rather than a workaround.
 
 ---
 
-## Phase 4 — Risk Engine — `pending`
+## Phase 4 — Risk Engine — `complete`
 
 Implement:
 
-* `risk/commission.py`: `per_lot_round_trip` vs `per_lot_per_side`
+* `risk/commission.py`: `per_lot_round_trip` vs `per_lot_per_side` — **done**
 * `risk/position_sizer.py`: fixed-lot mode and percent-balance mode using tick value /
-  tick size / contract size, never `1 point = $1`
+  tick size / contract size, never `1 point = $1` — **done**
 * `risk/stop_loss.py` + `risk/take_profit.py`: `StopLossProvider` / `TakeProfitProvider`
-  interfaces; fixed-points, risk-reward, signal-defined implementations
+  interfaces; fixed-points, risk-reward, signal-defined implementations — **done**
 * `risk/risk_manager.py`: order validation inputs — volume bounds, stop distance, freeze
-  level, margin, duplicate detection
-* `1:1` R:R support and the precedence rule against the fixed 1000-point TP
-* `docs/risk/RISK_MODEL.md`
+  level, margin, duplicate detection — **done**
+* `1:1` R:R support and the precedence rule against the fixed 1000-point TP — **done**
+* `docs/risk/RISK_MODEL.md` — **done**
 
-Gate: risk tests (balances, commission, rounding, min/max/step, invalid specs), commit, push.
+Delivered:
+
+* `risk/commission.py` — the mode is read from configuration every time and never
+  inferred, because reading it wrong doubles the cost and therefore halves the size without
+  raising anything.
+* `risk/position_sizer.py` — the budget is compared against **total** risk; the size always
+  floors onto `volume_step`; a budget too small for the broker minimum is refused.
+* `risk/stop_loss.py`, `risk/take_profit.py` — three providers each, and
+  `signal_defined > risk_reward > fixed_points` precedence in `resolve_target`.
+* `risk/risk_manager.py` — `RiskAssessment` with 11 stable rejection codes.
+* `docs/risk/RISK_MODEL.md`.
+* 140 tests in `tests/risk/`.
+
+Quality gate: **met** — 683 tests pass (1 skipped: the optional `albrooks` cross-check),
+`ruff` clean, `mypy --strict` clean over `src` and `tests`, architecture reports 38 modules
+and no violations.
+
+### The property
+
+> **the chosen volume never carries more total risk than the budget allowed**
+
+Stated as a `hypothesis` property over generated specifications, balances, percentages,
+commission rates and distances. Alongside it: the size is always on the broker's step, always
+within the min/max, rounding never increases it, `total_risk == price_risk + commission`,
+and the same input always gives the same size.
+
+### Scope note
+
+The roadmap also listed margin and duplicate detection under `risk_manager`. Both are
+deliberately **not** here: they need live broker state, so they belong to `execution/` in
+Phase 5. `stops_level` is checked from the specification now; the send-time rejection
+handling is Phase 5's.
+
+### Decisions made in Phase 4
+
+1. **The budget is divided by `total_per_lot`, not `price_per_lot`.** Sizing on price risk
+   alone gives 0.5 lots carrying $53.00 of a $50.00 budget — a 6 % overshoot on every trade,
+   invisible. Worked through in `docs/risk/RISK_MODEL.md` §3.
+2. **A budget below the broker minimum is refused, not clamped.** `refuse_below_min_volume`
+   defaults to `true`; rounding up to `volume_min` would carry 4× the budget on the
+   project's own numbers. A risk limit that does not bind is not a limit.
+3. **Rejections return a stable `code`, not prose.** Tested for uniqueness, snake_case, and
+   that every refusal names a known code.
+4. **A malformed target falls back rather than refusing.** The stop is what bounds risk, so a
+   bad take profit must not block a trade that is already safe. A malformed *stop* refuses.
+5. **`max_total_risk_fraction` is a second, independent brake**, configured as a fraction
+   with `1.0` meaning disabled, so a mistake in `percent` cannot widen it.
+6. **The stop is resolved before the size, never after.** A tighter stop is cheaper and
+   therefore buys a larger position — 0.8 lots at 50 points versus 0.4 at 100 — so deriving
+   the size first would silently under- or over-state the risk.
 
 ---
 

@@ -10,9 +10,9 @@
 
 ## Current Phase
 
-**Phase 3 — Core Strategy — COMPLETE and green.**
+**Phase 4 — Risk Engine — COMPLETE and green.**
 
-Next phase to execute: **Phase 4 — Risk Engine.**
+Next phase to execute: **Phase 5 — Order Execution.**
 
 ---
 
@@ -75,6 +75,21 @@ table.
 * 119 tests in `tests/strategy/`, including the headline no-look-ahead property proved on
   the **whole decision** rather than only on the freeze.
 
+### Phase 4 — Risk Engine
+
+* `risk/commission.py` — `per_lot_round_trip` versus `per_lot_per_side`, read from
+  configuration and never inferred.
+* `risk/position_sizer.py` — `percent_balance` and `fixed_lot`. The budget is compared
+  against **total** risk, the size always floors onto `volume_step`, and a budget below the
+  broker minimum is refused rather than rounded up.
+* `risk/stop_loss.py` / `risk/take_profit.py` — `StopLossProvider` / `TakeProfitProvider`
+  with fixed-points, risk-reward and signal-defined implementations, and the
+  `signal_defined > risk_reward > fixed_points` precedence rule.
+* `risk/risk_manager.py` — `RiskAssessment` with stable, machine-readable rejection codes.
+* `docs/risk/RISK_MODEL.md`.
+* 140 tests in `tests/risk/`, including **total risk never exceeds the budget** as a
+  `hypothesis` property.
+
 ## Files Added
 
 ```
@@ -83,6 +98,7 @@ docs/strategy/BASELINE.md
 docs/strategy/ENTRY_RULES.md
 docs/strategy/README.md
 docs/risk/README.md
+docs/risk/RISK_MODEL.md
 docs/mt5/README.md
 docs/mt5/SETUP.md
 docs/mt5/SYMBOL_SPECIFICATIONS.md
@@ -96,11 +112,21 @@ src/stop_order_scalp/strategy/candle_direction.py
 src/stop_order_scalp/strategy/entry_rules.py
 src/stop_order_scalp/strategy/signal.py
 src/stop_order_scalp/strategy/strategy.py
+src/stop_order_scalp/risk/commission.py
+src/stop_order_scalp/risk/position_sizer.py
+src/stop_order_scalp/risk/stop_loss.py
+src/stop_order_scalp/risk/take_profit.py
+src/stop_order_scalp/risk/risk_manager.py
 tests/strategy/conftest.py
 tests/strategy/test_candle_direction.py
 tests/strategy/test_entry_rules.py
 tests/strategy/test_signal.py
 tests/strategy/test_strategy.py
+tests/risk/conftest.py
+tests/risk/test_commission.py
+tests/risk/test_position_sizer.py
+tests/risk/test_risk_manager.py
+tests/risk/test_stop_loss_take_profit.py
 tests/unit/test_architecture.py
 tests/unit/test_cli.py
 tests/unit/test_interfaces.py
@@ -109,6 +135,28 @@ tests/unit/test_mt5.py
 ```
 
 ## Files Modified
+
+Phase 4:
+
+```
+src/stop_order_scalp/risk/*.py            the risk layer, new
+docs/risk/RISK_MODEL.md                    the sizing derivation and the worked example
+docs/risk/README.md                        rewritten: no longer a placeholder
+tests/risk/*                               140 tests
+HANDOFF.md                                 corrected 4 stale statements (see below)
+```
+
+**Corrections made to this file in Phase 4.** Reading it and checking every claim against
+the repository found four that had gone stale as earlier phases landed. Left uncorrected,
+they would have misled the next agent:
+
+* "Only `validate-config` is implemented" contradicted the table immediately below it;
+  `test-connection` landed in Phase 2.
+* "Only `execution/mt5_broker.py` and `market_data/mt5_feed.py` may import `MetaTrader5`"
+  — Phase 2 added `mt5_module.py`, which owns the import.
+* "Phases 2 through 12" in Remaining Work, when 2 and 3 were done.
+* `docs/{risk,testing,operations,research}/` described as placeholder-only; `docs/risk/`
+  now has a real model.
 
 Phase 3:
 
@@ -147,7 +195,7 @@ tests/conftest.py, tests/unit/*.py            annotations, hermetic .env
 
 ## Tests
 
-533 passing, 1 skipped.
+683 passing, 1 skipped.
 
 | File | Tests |
 | --- | --- |
@@ -164,6 +212,10 @@ tests/conftest.py, tests/unit/*.py            annotations, hermetic .env
 | `tests/unit/test_cli.py` | 25 |
 | `tests/unit/test_logging.py` | 25 |
 | `tests/strategy/test_strategy.py` | 24 |
+| `tests/risk/test_position_sizer.py` | 50 |
+| `tests/risk/test_stop_loss_take_profit.py` | 41 |
+| `tests/risk/test_commission.py` | 30 |
+| `tests/risk/test_risk_manager.py` | 19 |
 
 The single skip is the `albrooks` cross-check of `freeze_closed_bars`, which needs the
 optional extra. It is the only skip in the suite, and is acceptable only because that extra
@@ -172,17 +224,17 @@ is genuinely optional.
 ## Test Results
 
 ```
-python -m pytest                             533 passed, 1 skipped
+python -m pytest                             683 passed, 1 skipped
 python -m ruff check .                       All checks passed!
-python -m mypy                               Success: no issues found in 48 source files
-python scripts/check_architecture.py         architecture OK: 33 modules checked
+python -m mypy                               Success: no issues found in 62 source files
+python scripts/check_architecture.py         architecture OK: 38 modules checked
 python -m stop_order_scalp validate-config   exit 0
 python -m stop_order_scalp test-connection   exit 3, reports package_installed: false
 ```
 
 ## Git Commit
 
-`feat(strategy): M15 direction filter, M1 stop entries, and the no-look-ahead proof`
+`feat(risk): position sizing, commission, SL/TP providers, and rejection codes`
 
 ## Git Push
 
@@ -198,7 +250,7 @@ src/stop_order_scalp/
     infrastructure/  IMPLEMENTED — config, logging, clock
     market_data/     IMPLEMENTED — timeframes, candles/freeze, mt5_module, mt5_feed
     strategy/        IMPLEMENTED — candle_direction, entry_rules, signal, strategy
-    risk/            empty      Phase 4
+    risk/            IMPLEMENTED — commission, position_sizer, stop_loss, take_profit, manager
     execution/       empty      Phases 5, 6
     trailing/        empty      Phase 6
     lifecycle/       empty      Phase 7
@@ -207,7 +259,7 @@ src/stop_order_scalp/
     research/        empty      Phase 12
     application/     empty      composition + orchestration
     cli/             IMPLEMENTED — contract + validate-config + test-connection
-tests/              unit (414) + strategy (119). integration/ exists but is empty.
+tests/              unit (414) + strategy (119) + risk (140)
 config/default.yaml  strategy defaults
 scripts/             check_architecture.py
 ```
@@ -254,10 +306,9 @@ common broker offset, but **not** for `D1` at a non-whole-hour offset such as UT
 
 ## The CLI contract is ahead of its implementations
 
-`cli/main.py` fixes the whole command surface in Phase 1. Only `validate-config` is
-implemented. The other six commands exit **4** with a named message, because
-`ComponentNotAvailableError` is raised rather than an `ImportError` traceback reaching the
-operator:
+`cli/main.py` fixes the whole command surface in Phase 1. Two commands are implemented;
+the rest exit **4** with a named message, because `ComponentNotAvailableError` is raised
+rather than an `ImportError` traceback reaching the operator:
 
 | Command | Implemented in | Currently |
 | --- | --- | --- |
@@ -272,12 +323,12 @@ with a normal import and delete the now-unnecessary indirection.
 
 ## Remaining Work
 
-Phases 2 through 12, exactly as listed in `ROADMAP.md`. In order:
+Phases 5 through 12, exactly as listed in `ROADMAP.md`. In order:
 
 1. Project foundation — **done**
 2. Market data — **done**
 3. Core strategy — **done**
-4. Risk engine
+4. Risk engine — **done**
 5. Order execution
 6. Position management
 7. Lifecycle and recovery
@@ -384,6 +435,21 @@ Phases 2 through 12, exactly as listed in `ROADMAP.md`. In order:
 21. **Entry rounding and stop rounding are different methods with opposite signs.**
     `round_entry_price` is anchored on the candle's extreme; `round_stop_price` is anchored
     on the entry. Mixing them up moves every order a tick toward the market.
+22. **The risk budget is compared against `total_risk`, never `price_risk`.** Sizing on
+    price risk alone ignores the commission and over-sizes every position — 6 % on the
+    project's own numbers, silently. The three figures stay separate on `TradePlan` for
+    exactly this reason.
+23. **A size always floors onto the broker's volume step.** Rounding up would exceed the
+    approved budget. With `refuse_below_min_volume`, a budget too small for the broker's
+    minimum is **refused**, not rounded up to it — a limit that does not bind is not a limit.
+24. **Rejections carry stable, machine-readable codes.** Prose forces every caller to parse
+    English; a code can be counted, alerted on and compared across runs. The strings in
+    `RejectionCode` are an interface — add one rather than reword one.
+25. **A bad target must not stop a trade whose risk is already bounded.** The stop is what
+    bounds risk, so a malformed take profit falls back to the configured target. A
+    malformed *stop*, by contrast, refuses the trade.
+26. **A tighter stop buys a larger position.** Which is why the stop must be fixed before
+    the size, never derived from it. `tests/risk/test_risk_manager.py` pins it.
 
 ## Configuration
 
@@ -403,51 +469,52 @@ code reads the variable.
 
 ## Next Recommended Phase
 
-**Phase 4 — Risk Engine.** Start at `ROADMAP.md` §"Phase 4", with
-`docs/strategy/ENTRY_RULES.md`, `docs/mt5/SYMBOL_SPECIFICATIONS.md` §2 and
-`docs/strategy/BASELINE.md` §4 as the design input.
+**Phase 5 — Order Execution.** Start at `ROADMAP.md` §"Phase 5", with
+`docs/risk/RISK_MODEL.md` and `docs/architecture/ARCHITECTURE.md` §8 as the design input.
 
-The pieces Phase 4 needs all exist:
+This is the first phase that can touch a broker, and it is where decisions 4, 5, 6 and 7
+from the list above stop being documentation and become code. Read those four carefully
+before designing anything.
 
-| What Phase 4 needs | Where it is |
+| What Phase 5 needs | Where it is |
 | --- | --- |
-| `SymbolSpecification`: `tick_value`, `contract_size`, `points_to_price`, `normalize_volume`, `round_stop_price`, `round_entry_price` | `domain/value_objects/price.py` |
-| `Money`, `Price`, `Volume` | `domain/value_objects/price.py` |
-| `TradePlan` with the three risk figures already separate | `domain/models.py` |
-| `RiskAssessment` (with `reject()` as a classmethod) | `domain/models.py` |
-| `RiskMode`, `TargetMode`, `CommissionMode` | `domain/enums.py` |
-| `RiskSettings`, `TargetSettings`, `StopLossSettings` | `infrastructure/config.py` |
-| `AccountSnapshot` (balance, equity, margin) | `domain/models.py` |
-| `TradeSignal` / `TradeDecision` as the input | `strategy/signal.py` |
+| `Broker` protocol (`place_order`, `cancel_order`, `modify_position`) | `domain/interfaces.py` |
+| `OrderKind`, `Side`, `OrderRecord`, `OrderIntent` | `domain/enums.py`, `domain/models.py` |
+| `TradePlan` — the sized, validated thing to send | `domain/models.py` |
+| `RiskAssessment` with its codes | `domain/models.py`, `risk/risk_manager.py` |
+| `ExecutionSettings` (magic number, poll interval, retry) | `infrastructure/config.py` |
+| `OrderSettings` (deviation, filling policy, min_stop_points) | `infrastructure/config.py` |
+| `SymbolSpecification` for stops-level and volume normalisation | `domain/value_objects/price.py` |
+| `MT5Module` / `MT5Api` — reuse them, do not re-import | `market_data/mt5_module.py` |
+| `BrokerError` / `BrokerRejectedError` / `ExecutionUnknownError` / `RetryableError` | `domain/exceptions.py` |
+| `SymbolSpecification.round_entry_price` for the order price | `domain/value_objects/price.py` |
 
 Concretely, in order:
 
-1. `risk/commission.py` — `per_lot_round_trip` versus `per_lot_per_side`. Read
-   `CommissionMode` rather than inventing a third shape.
-2. `risk/position_sizer.py` — `percent_balance` and `fixed_lot`. **The budget is compared
-   against `total_risk`, not `price_risk`**, and the size **rounds down** to
-   `volume_step`; with `refuse_below_min_volume`, a size below the broker minimum is
-   refused rather than rounded up, because up-rounding exceeds the budget. The worked
-   example is in `docs/mt5/SYMBOL_SPECIFICATIONS.md` §2 — 0.5 % of $10,000 against a
-   $100/lot risk and $6/lot commission gives 0.4 lots, while the naive 0.5 lots would carry
-   $53 of a $50 budget.
-3. `risk/stop_loss.py` and `risk/take_profit.py` — `StopLossProvider` /
-   `TakeProfitProvider` interfaces with fixed-points, risk-reward and signal-defined
-   implementations. The `1:1` R:R precedence rule against the fixed 1000-point TP is the
-   part to get right; see `TargetMode` and `TargetSettings` for the modes already modelled.
-4. `risk/risk_manager.py` — `RiskAssessment`. Validate volume bounds, stop distance
-   against `SymbolSpecification.stops_level`, `max_total_risk_fraction`, and reject with a
-   **machine-readable `code`**, using `RiskAssessment.reject(code, reason)`.
-5. `docs/risk/RISK_MODEL.md` — the sizing derivation and the three distinguishable figures.
-6. Gates, then `ROADMAP.md` → `HANDOFF.md` → `CHANGELOG.md` → `README.md` → `README.fa.md`
+1. **`execution/gates.py`** — `OrderGate` and `CloseGate`, each `enabled=False` by default,
+   with one ordered `refusal()` explaining what is missing. Build this **before** anything
+   that can send, so every later path has to pass through it.
+2. **`execution/order_manager.py`** — build, validate, place. **Re-read broker orders for
+   the magic number immediately before every send** and refuse if a matching pending order
+   already exists. That is the blink-restart protection, and it must be a precondition of
+   the send rather than a check someone remembers to run.
+3. **`execution/mt5_broker.py`** — `Broker` over the native API, reusing `MT5Module`
+   rather than importing `MetaTrader5` again. Translate `BrokerError` subtypes from the
+   terminal's retcode; `ExecutionUnknownError` is the one that matters most and must be
+   raised — never retried — on an indeterminate outcome.
+4. **`execution/simulated_broker.py`** — a full in-memory venue with real bid/ask, fills,
+   stops and commission. This is **not** a test double: it is what `DRY_RUN` and the
+   backtester run on, so it has to be a first-class implementation from the start.
+5. **Retry classification** — bounded exponential backoff with jitter for *safe reads*
+   only, using `RetrySettings`. Assert in a test that a send is never retried.
+6. Tests: duplicate prevention, rejection handling, and an explicit test that an unknown
+   send outcome is re-observed rather than resent.
+7. Gates, then `ROADMAP.md` → `HANDOFF.md` → `CHANGELOG.md` → `README.md` → `README.fa.md`
    → commit → push.
 
-**Two things to carry forward from Phase 3.** The strategy deliberately supplies no stop
-loss and no take profit, so the risk engine is the only thing that produces them — keep it
-that way, or it becomes impossible to tell which signals carried geometry. And
-`round_stop_price` is anchored on the *entry* while `round_entry_price` is anchored on the
-*candle extreme*; the SL/TP code wants the former, and mixing them up inverts the sign of the
-protection.
+**Do not** promote `test-connection` or any other command to live capability in this phase.
+`OrderGate`/`CloseGate` and the three-fold `LIVE` interlock are the safety surface, and they
+land with `execution/gates.py` and its tests.
 
 ## Important Notes For The Next AI Agent
 
@@ -461,8 +528,9 @@ protection.
 * **`mypy` checks `src` *and* `tests`** — the config sets `files = ["src", "tests"]` with
   `strict = true`. Adding an unannotated test helper will fail the build.
 * **Prefer `python -m pytest` / `python -m stop_order_scalp`** over console scripts.
-* **Only `execution/mt5_broker.py` and `market_data/mt5_feed.py` may import
-  `MetaTrader5`**, and only inside a function body. Only
+* **Only `market_data/mt5_module.py`, `market_data/mt5_feed.py` and
+  `execution/mt5_broker.py` may import `MetaTrader5`**, and only inside a function body —
+  and only `mt5_module.py` actually contains the `import`. Only
   `integrations/al_brooks_adapter.py` may import `albrooks`.
 * **Test isolation is by construction** — protocols plus hand-written fakes. No mocking
   framework, no skip markers, and no MT5 in the unit suite at all.

@@ -7,12 +7,13 @@
 > **Status: under active development.** See [`ROADMAP.md`](ROADMAP.md) for what exists
 > today and [`HANDOFF.md`](HANDOFF.md) for the state of the last completed phase.
 >
-> **Phases 1–3 complete** (foundation, market data, core strategy). The domain layer,
-> configuration, logging, clock, the MetaTrader 5 feed, the closed-candle freeze and the
-> M15/M1 baseline decision are implemented and tested — **533 tests, no broker required**.
-> Of the seven CLI commands below, `validate-config` and `test-connection` work; the rest
-> exit **4** and say which phase has not landed. The command surface is fixed ahead of its
-> implementations on purpose, so the contract is testable now.
+> **Phases 1–4 complete** (foundation, market data, core strategy, risk engine). The
+> domain layer, configuration, logging, the MetaTrader 5 feed, the closed-candle freeze,
+> the M15/M1 baseline decision and the position sizer are implemented and tested — **683
+> tests, no broker required**. Of the seven CLI commands below, `validate-config` and
+> `test-connection` work; the rest exit **4** and say which phase has not landed. The
+> command surface is fixed ahead of its implementations on purpose, so the contract is
+> testable now.
 >
 > **No profitability is claimed.** See [`docs/strategy/BASELINE.md`](docs/strategy/BASELINE.md).
 >
@@ -100,7 +101,7 @@ Part of the contract, because a supervisor process depends on them.
 ## Development
 
 ```bash
-python -m pytest                             # 533 tests
+python -m pytest                             # 683 tests
 python -m ruff check .                       # lint
 python -m mypy                               # types, strict, src + tests
 python scripts/check_architecture.py         # architecture boundaries
@@ -180,7 +181,7 @@ CLI  →  Application (TradingService)  →  Orchestrator
 * `simulated_broker` is a first-class implementation, not a test double — it is what
   `DRY_RUN` and the backtester run on.
 
-### The three rules that matter most
+### The four rules that matter most
 
 **A candle must be closed before it can be read.** `market_data/candles.py` is the only
 route candles take to a decision. It drops every bar that had not finished at an explicitly
@@ -196,13 +197,21 @@ modelled as a first-class `NoTrade` carrying a named reason, not as an exception
 signal — otherwise every caller has to re-derive *why* nothing happened, and they will
 eventually disagree.
 
+**A risk limit that does not bind is not a limit.** The position sizer divides the budget by
+*total* risk — price risk **plus** commission — and always rounds the size **down**. On the
+project's own numbers, sizing on price risk alone would buy 0.5 lots carrying $53.00 of a
+$50.00 budget: a 6 % overshoot on every trade, visible in no log and raised by nothing. A
+budget too small for the broker's minimum position is **refused**, not rounded up. See
+[`docs/risk/RISK_MODEL.md`](docs/risk/RISK_MODEL.md).
+
 **Broker server time decides when a candle is closed.** MetaTrader 5 anchors bars and
 sessions to server time, which is usually not UTC, so the local clock would be hours wrong —
 and would look like a working strategy. `ServerClock` reads the terminal's own clock and
 reports when it has had to fall back. See [`docs/mt5/SETUP.md`](docs/mt5/SETUP.md) §4.
 
-See [`docs/architecture/ARCHITECTURE.md`](docs/architecture/ARCHITECTURE.md) and
-[`docs/strategy/ENTRY_RULES.md`](docs/strategy/ENTRY_RULES.md).
+See [`docs/architecture/ARCHITECTURE.md`](docs/architecture/ARCHITECTURE.md),
+[`docs/strategy/ENTRY_RULES.md`](docs/strategy/ENTRY_RULES.md) and
+[`docs/risk/RISK_MODEL.md`](docs/risk/RISK_MODEL.md).
 
 ## Contributing
 

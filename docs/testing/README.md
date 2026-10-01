@@ -10,7 +10,7 @@ This page is the short version, and it is accurate today.
 ```bash
 python -m pip install -e ".[dev]"
 
-python -m pytest                             # 533 tests, 1 skipped
+python -m pytest                             # 683 tests, 1 skipped
 python -m ruff check .                       # lint
 python -m mypy                               # types, strict, src + tests
 python scripts/check_architecture.py         # architecture boundaries
@@ -24,19 +24,23 @@ python scripts/check_architecture.py         # architecture boundaries
 | File | Tests | Covers |
 | --- | --- | --- |
 | `tests/unit/test_mt5.py` | 72 | The MT5 boundary against a fake terminal: lazy import, converters, feed, `ServerClock`, `probe_connection` |
-| `tests/strategy/test_signal.py` | 37 | The decision, the no-trade reasons, the instrument policy, and the no-look-ahead properties |
-| `tests/unit/test_config.py` | 55 | Three-layer config, unknown-key rejection, `.env` precedence, secret handling |
 | `tests/unit/test_interfaces.py` | 62 | The four protocols; every module imports; every `__all__` entry resolves |
+| `tests/unit/test_config.py` | 55 | Three-layer config, unknown-key rejection, `.env` precedence, secret handling |
+| `tests/risk/test_position_sizer.py` | 50 | The worked example, points-vs-dollars, rounding, broker bounds, sizing properties |
 | `tests/unit/test_value_objects.py` | 46 | `Price`, `Money`, `Volume`, `SymbolSpecification`, point/price arithmetic |
 | `tests/unit/test_candles.py` | 43 | The freeze, the report, timezone handling, the no-look-ahead properties |
-| `tests/strategy/test_candle_direction.py` | 33 | The five verdicts, closed-candle enforcement, the doji case |
+| `tests/strategy/test_signal.py` | 37 | The decision, the no-trade reasons, the instrument policy, and the no-look-ahead properties |
 | `tests/unit/test_architecture.py` | 34 | The architecture gate itself, including deliberately broken source |
-| `tests/strategy/test_entry_rules.py` | 25 | The two entry rules, points resolution, entry-vs-stop rounding |
-| `tests/strategy/test_strategy.py` | 24 | Construction refusals, dispatch, the self-describing rule |
+| `tests/strategy/test_candle_direction.py` | 33 | The five verdicts, closed-candle enforcement, the doji case |
+| `tests/risk/test_stop_loss_take_profit.py` | 41 | Stop and target providers, rounding asymmetry, target precedence |
+| `tests/risk/test_commission.py` | 30 | Round-trip versus per-side, and that they differ by exactly two |
 | `tests/unit/test_timeframes.py` | 27 | Period seconds, boundary math, candle closure, timezone handling |
+| `tests/strategy/test_entry_rules.py` | 25 | The two entry rules, points resolution, entry-vs-stop rounding |
 | `tests/unit/test_cli.py` | 25 | Parser surface, exit codes, commands whose phase has not landed |
 | `tests/unit/test_logging.py` | 25 | JSONL audit records, rotation, structural absence of secrets |
-| **Total** | **533** (1 skipped) | |
+| `tests/strategy/test_strategy.py` | 24 | Construction refusals, dispatch, the self-describing rule |
+| `tests/risk/test_risk_manager.py` | 19 | Sizing end to end, and every rejection code |
+| **Total** | **683** (1 skipped) | |
 
 The one skip is the cross-check of `freeze_closed_bars` against the independent Al Brooks
 implementation, which needs the optional `albrooks` extra. It is the only skip in the suite
@@ -93,6 +97,9 @@ examples anyone thought to write:
 * the same input always produces the same output
 * input order never changes the decision
 * a decision never uses a bar that had not closed at the reference
+* **the chosen position size never carries more total risk than the budget allowed**
+* a position size is always on the broker's volume step and within its min/max
+* rounding a size down never increases it
 * **Phase 6:** a trailing stop is monotonic — BUY `sl_new >= sl_old`, SELL
   `sl_new <= sl_old`
 
@@ -102,6 +109,10 @@ behaved on the case somebody thought of. The generators vary the bar count, the 
 the reference moment within the series, and the timeframe step, because the interesting
 cases are the ones where the reference falls in the middle of a forming bar.
 
+The sizing property is stated the same way, over generated specifications, balances,
+percentages, commission rates and distances — the cases where the numbers only line up
+neatly are the cases where a rounding bug is least likely to show.
+
 **A property test that fails is not always a bug in the code.** When
 `test_appending_future_bars_cannot_change_the_decision` first failed, the correct answer
 turned out to be that the strategy was right and the *test helper* was wrong: it generated
@@ -109,6 +120,13 @@ turned out to be that the strategy was right and the *test helper* was wrong: it
 sometimes produced bars the reference could legitimately see. Fixing the helper rather than
 the strategy was the right call — but only after checking, which is the whole reason to
 write the property rather than an example.
+
+**Test fixtures have to be honest too.** Writing the risk tests surfaced several cases
+where a fixture would have passed for the wrong reason: bars with identical highs that
+could not distinguish which one the rule selected, a `commission_model=None` sentinel that
+silently meant "the baseline" rather than "no commission", and a rounding case built on a
+specification the sizer correctly refuses. Each is now pinned by a test that would fail if
+the fixture were weakened.
 
 ## Testing the MT5 boundary without a terminal
 

@@ -323,3 +323,72 @@ wrong — which is exactly the kind of thing that is better to find here than in
 - **No profitability is claimed.** Nothing has been run against real market data.
 - The strategy layer is pure: no clock, no I/O, no broker. All 533 tests pass with no
   terminal installed.
+
+---
+
+### Phase 4 — Risk Engine
+
+#### Added
+
+- `risk/commission.py` — `per_lot_round_trip` versus `per_lot_per_side`. The mode is read
+  from configuration every time and never inferred: reading it wrong doubles the cost per
+  lot and therefore halves the position size, without raising anything.
+- `risk/position_sizer.py` — `percent_balance` and `fixed_lot`. The size is
+  `budget / total_per_lot` and **always floors** onto the broker's volume step.
+  `SizingResult` carries every intermediate figure, because "why 0.4 lots" is the first
+  question asked when something looks wrong.
+- `risk/stop_loss.py` / `risk/take_profit.py` — `StopLossProvider` and `TakeProfitProvider`
+  protocols with fixed-points, risk-reward and signal-defined implementations, plus
+  `resolve_target` implementing `signal_defined > risk_reward > fixed_points`.
+- `risk/risk_manager.py` — `RiskAssessment` with 11 stable, machine-readable rejection
+  codes, `stops_level` validation before sizing, and the independent
+  `max_total_risk_fraction` ceiling.
+- `docs/risk/RISK_MODEL.md` — the sizing derivation, the worked example, the rounding rules,
+  and the full rejection-code table.
+- 140 tests in `tests/risk/`.
+
+#### The property
+
+> **the chosen volume never carries more total risk than the budget allowed**
+
+Stated as a `hypothesis` property over generated specifications, balances, percentages,
+commission rates and distances. Alongside it: the size is always on the broker's step and
+within the min/max, rounding never increases it, `total_risk == price_risk + commission`,
+and the same input always gives the same size.
+
+#### Decisions
+
+- **The budget is divided by `total_per_lot`, not `price_per_lot`.** Sizing on price risk
+  alone gives 0.5 lots carrying $53.00 of a $50.00 budget — a 6 % overshoot on every trade,
+  visible in no log and raised by nothing. Worked through in `RISK_MODEL.md` §3.
+- **A budget below the broker minimum is refused, not clamped.** `refuse_below_min_volume`
+  defaults to `true`; rounding up to `volume_min` carries 4× the budget on these numbers.
+  A risk limit that does not bind is not a limit.
+- **Rejections return a stable `code`, not prose.** Prose forces every caller to parse
+  English. Tested for uniqueness, snake_case, and that every refusal names a known code. The
+  strings are an interface: add one rather than reword one.
+- **A malformed target falls back; a malformed stop refuses.** The stop is what bounds risk,
+  so a bad take profit must not block a trade that is already safe.
+- **The stop is resolved before the size.** A tighter stop is cheaper and so buys a *larger*
+  position — 0.8 lots at 50 points against 0.4 at 100. Deriving the size first would
+  misstate the risk in whichever direction happened to be worse.
+- **Margin and duplicate detection are deliberately not here.** Both need live broker state
+  and belong to `execution/` in Phase 5.
+
+#### Corrected — documentation
+
+`HANDOFF.md` had drifted from the repository as earlier phases landed. Four claims were
+stale and are corrected here, because that file is what the next agent trusts:
+
+- "Only `validate-config` is implemented" contradicted the table directly beneath it;
+  `test-connection` landed in Phase 2.
+- The `MetaTrader5` allowlist was quoted as two modules; Phase 2 added `mt5_module.py`,
+  which is the one that owns the `import`.
+- "Phases 2 through 12" in Remaining Work, when 2 and 3 were done.
+- `docs/risk/` was described as a placeholder; it now carries a real model.
+
+#### Notes
+
+- **No profitability is claimed.** Every figure here is arithmetic on *assumed* inputs. The
+  real `US30` numbers arrive in Phase 11 and will rescale these results.
+- `risk/` is pure: no clock, no I/O, no broker. All 683 tests pass with no terminal.
