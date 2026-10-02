@@ -104,6 +104,25 @@ candle's **close**, so protective levels are evaluated at closes only and never 
 high or low. A bar whose low went through the trailing stop is not treated as stopped out if
 the close is above it, and a bar whose high crossed the take profit is not taken.
 
+### And the number above is a bracket, not a measurement
+
+The replay publishes each candle's **close**, so the trailing stop never sees an intrabar
+extreme. Measured both ways on the same data:
+
+| | trades | net | profit factor |
+| --- | --- | --- | --- |
+| close only | 22 | +1859.46 | 6.57 |
+| high and low published | 3 | −65.96 | 0.30 |
+
+**The whole result is inside that bracket.** Neither end is the answer — close-only is
+optimistic, and publishing the extremes is unfair because it lets a position's entry bar
+trigger the stop from a move that happened before the entry filled. OHLC bars do not record
+which came first.
+
+So this harness cannot currently measure this strategy's edge, and the +16% above should not
+be quoted as a result. The fix is tick data, which the terminal can export and which removes
+the ambiguity entirely.
+
 Two results in opposite directions from the same code and the same data is the strongest
 possible argument for re-running this after every change to the candle layer.
 

@@ -738,6 +738,41 @@ That is the most useful thing Phase 11 has produced, and it cost one day of inve
 find out. The open question is whether the loss is the entries (the rule) or the exits (a
 trailing stop that gives back too much) or simply the size the risk budget demands.
 
+### The headline number cannot be resolved from OHLC bars
+
+The replay publishes each candle's **close** to the venue. Protective levels are checked on
+every publish, so they are only ever checked against closes, and the bar's high and low are
+never seen. For a system whose entire exit is a trailing stop, that is the one thing it must
+see.
+
+Measured both ways on the same 30 022 bars:
+
+| | trades | net | profit factor |
+| --- | --- | --- | --- |
+| close only (today) | 22 | +1859.46 | 6.57 |
+| bar high and low published | 3 | **-65.96** | **0.30** |
+
+The whole result is inside that bracket. **Neither end is the answer**, because OHLC bars do
+not say which came first:
+
+- close-only is the *optimistic* reading: the stop is only seen if the bar ended through it
+- publishing the extremes is the *pessimistic* reading, and unfair besides -- it lets a
+  position's own entry bar trigger the stop from a price move that happened *before* the entry
+  filled
+
+So the honest statement is that this backtest cannot currently measure this strategy's edge.
+Three ways out, in increasing order of cost:
+
+1. **Defer protective evaluation to the bar after entry.** Cheap, and it removes the unfair
+   part of the pessimistic bound. It still cannot order a high against a low *within* a later
+   bar.
+2. **Report both bounds.** Never quote the optimistic one alone.
+3. **Replay tick data.** The terminal can export it, and then there is no ambiguity at all.
+   This is the only option that makes the number mean what it appears to mean, and it is the
+   one to do before drawing any conclusion.
+
+Nothing here says the rule is bad. It says the harness cannot yet tell.
+
 ### `aggregate()` grouped by position, not by timestamp
 
 Found by comparing our M15 candles against the terminal's own. On real data the rule took every

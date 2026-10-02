@@ -35,10 +35,22 @@ at 11:42 and has weekend and daily-session gaps, so 1 822 of 2 001 "M15" candles
 candles that never existed. Fixed, verified against the terminal's own M15 bars, all 2 009 now
 agree exactly.
 
-**Do not treat +16% as a result.** One month, one sample, and the venue is still optimistic: the
-replay publishes only each candle's close, so protective levels never see an intrabar high or
-low. A bar whose low went through the trailing stop is not stopped out when the close is above
-it. That inflates the number, and how much is unmeasured.
+**Do not treat +16% as a result — and now there is a measurement.** The replay publishes only
+each candle's close, so the trailing stop never sees an intrabar extreme. Measured both ways on
+the same data:
+
+| | trades | net | profit factor |
+| --- | --- | --- | --- |
+| close only | 22 | +1859.46 | 6.57 |
+| high and low published | 3 | -65.96 | 0.30 |
+
+**The entire result sits inside that bracket, so this harness cannot currently measure the
+strategy's edge.** Neither end is right: close-only is optimistic, and publishing the extremes
+lets a position's own entry bar trigger the stop from a move that preceded the fill. OHLC bars
+do not record which came first.
+
+The fix is tick data — the terminal exports it, and then the ambiguity is gone. Until then,
+report the bracket, never the optimistic end alone.
 
 **Do not change the rule yet.** Two results in opposite directions from the same code means the
 candle layer, not the strategy, is what has been moving.
