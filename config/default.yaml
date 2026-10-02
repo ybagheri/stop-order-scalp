@@ -16,15 +16,23 @@
 # =============================================================================
 
 symbol: US30
-# Broker symbol names accepted for the logical instrument above. Different brokers
-# expose US30, US30.cash, US30m, DJ30. Matching is exact, case-insensitive. Listing a
-# name here is an explicit decision to trade it -- there is no fuzzy or substring match,
-# so US30mini or EURUSD30 can never be traded by accident.
+# Broker symbol names accepted for the logical instrument above. Different brokers expose the
+# Dow under different names: Alpari offers `US30`, A Markets offers `DowJones30`. Matching is
+# exact, case-insensitive. Listing a name here is an explicit decision to trade it -- there is
+# no fuzzy or substring match, so US30mini or EURUSD30 can never be traded by accident.
+#
+# **Every listed name needs its own measured specification** in
+# `src/stop_order_scalp/market_data/symbols.py`. The two are not interchangeable: Alpari's
+# US30 is quoted to one decimal and pays 0.10 per point per lot, while A Markets' DowJones30
+# is quoted to none and pays 1.00. Using one broker's numbers for the other mis-scales every
+# position and every reported profit -- which is exactly the error that made Phase 10's first
+# backtest twelve times too flattering.
 symbol_aliases:
   - US30
   - US30.cash
   - US30m
   - DJ30
+  - DowJones30
 # Observed but not approved. Reported by `status`, never traded automatically.
 symbol_quarantine: []
 

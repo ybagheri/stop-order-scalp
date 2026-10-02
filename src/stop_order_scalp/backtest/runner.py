@@ -19,7 +19,7 @@ from stop_order_scalp.backtest.replay import replay
 from stop_order_scalp.domain.exceptions import ConfigError
 from stop_order_scalp.infrastructure.config import AppConfig
 from stop_order_scalp.market_data.candles import aggregate, load_candles_csv
-from stop_order_scalp.market_data.symbols import MEASURED
+from stop_order_scalp.market_data.symbols import us30_specification
 
 __all__ = ["run_backtest_from_args"]
 
@@ -42,12 +42,11 @@ def run_backtest_from_args(args: argparse.Namespace, config: AppConfig) -> dict[
     if not path.exists():
         raise ConfigError(f"no candle file at {path}")
 
-    # Digits come from the assumed specification, which is where they live for every other
-    # code path. There is no `specification_digits` on the strategy settings, and adding one
-    # would put the symbol's precision in two places that could disagree -- and a replay that
-    # parsed prices at a different precision than the venue quotes them would fill orders at
-    # levels that do not exist.
-    digits = MEASURED.digits
+    # Digits come from the *measured* specification for the symbol being replayed, not from a
+    # constant. Replaying A Markets data while parsing at Alpari's precision would silently
+    # round every price, and replaying a whole-number instrument at one decimal would invent
+    # digits that are not there. `--symbol` selects which measurement applies.
+    digits = us30_specification(config.strategy.symbol).digits
     candles = load_candles_csv(path, timeframe=timeframe, digits=digits)
     if not candles:
         raise ConfigError(f"{path} contained no usable rows")

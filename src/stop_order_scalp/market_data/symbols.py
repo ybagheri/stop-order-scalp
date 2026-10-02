@@ -31,9 +31,17 @@ from __future__ import annotations
 from dataclasses import dataclass
 from decimal import Decimal
 
+from stop_order_scalp.domain.exceptions import InvalidSpecificationError
 from stop_order_scalp.domain.value_objects import SymbolSpecification
 
-__all__ = ["MEASURED_FROM", "MEASURED_ON", "us30_specification"]
+__all__ = [
+    "MEASURED",
+    "MEASURED_BY_SYMBOL",
+    "MEASURED_DOWJONES30",
+    "MEASURED_FROM",
+    "MEASURED_ON",
+    "us30_specification",
+]
 
 
 #: When these numbers were read, and from where. Kept next to the numbers because a
@@ -83,7 +91,7 @@ class MeasuredUS30:
         }
 
 
-#: As read from the terminal. The assumed values, for comparison, are in ``docs/mt5/``.
+#: As read from Alpari MT5. Superseded for A Markets -- see the table above.
 MEASURED = MeasuredUS30(
     point=Decimal("0.1"),
     tick_size=Decimal("0.1"),
@@ -97,25 +105,70 @@ MEASURED = MeasuredUS30(
     digits=1,
 )
 
+#: A Markets `DowJones30`, measured 2026-10-02, account 8039744 on `AMarkets-Demo`.
+#:
+#: Quoted to **zero decimals**. `point` is 1.0, so one "point" in this project's configuration
+#: is one whole index point, and a 100-point stop costs $100 a lot rather than $10. The position
+#: sizer handles that on its own -- it is told the specification, not the number of lots -- but
+#: it is worth naming because every offset, stop and target in `config/default.yaml` means
+#: something ten times larger here than it did on Alpari.
+MEASURED_DOWJONES30 = MeasuredUS30(
+    point=Decimal("1.0"),
+    tick_size=Decimal("1.0"),
+    tick_value=Decimal("1.0"),
+    contract_size=Decimal("1.0"),
+    volume_min=Decimal("0.01"),
+    volume_max=Decimal("100.0"),
+    volume_step=Decimal("0.01"),
+    stops_level=0,
+    freeze_level=0,
+    digits=0,
+)
+
+#: Keyed by the broker's own symbol name, because that is the identity the venue uses.
+MEASURED_BY_SYMBOL: dict[str, MeasuredUS30] = {
+    "US30": MEASURED,
+    "DowJones30": MEASURED_DOWJONES30,
+}
+
 
 def us30_specification(symbol: str = "US30") -> SymbolSpecification:
-    """The measured US30 specification as the domain object the venue needs.
+    """The measured specification for ``symbol``, or an error naming what is available.
 
-    Named ``us30_...`` rather than ``assumed_...`` because it is no longer an assumption. The
-    name change is deliberate: the old name is what let the value sit in two modules
-    unchallenged for ten phases, and a reader seeing "assumed" in a money path learns to
-    discount it.
+    Per broker, because a specification is a *contract* fact and not a universal one. Measured
+    from two brokers on the same day, the same index:
+
+        Alpari US30        point 0.1    value per point per lot 0.10
+        A Markets DowJones30  point 1.0  value per point per lot 1.00
+
+    Ten times apart, and the two disagree about what a "point" even is -- Alpari quotes US30
+    to one decimal, A Markets to none at all. Carrying one broker's numbers into the other
+    silently mis-scales every position and every reported profit, which is precisely the error
+    that made Phase 10's first result twelve times too flattering.
+
+    An unknown symbol raises rather than falling back to a default. A default here would be the
+    exact failure this function exists to prevent: a plausible specification for an instrument
+    nobody measured.
     """
+    measured = MEASURED_BY_SYMBOL.get(symbol)
+    if measured is None:
+        known = ", ".join(sorted(MEASURED_BY_SYMBOL))
+        raise InvalidSpecificationError(
+            f"no measured specification for {symbol!r}. Measured here: {known}. Re-measure with "
+            "the terminal rather than guessing: a different broker's contract sizes, tick "
+            "values and volume limits are not interchangeable, and using the wrong ones "
+            "mis-scales every position and every reported profit."
+        )
     return SymbolSpecification(
         name=symbol,
-        digits=MEASURED.digits,
-        point=MEASURED.point,
-        tick_size=MEASURED.tick_size,
-        tick_value=MEASURED.tick_value,
-        contract_size=MEASURED.contract_size,
-        volume_min=MEASURED.volume_min,
-        volume_max=MEASURED.volume_max,
-        volume_step=MEASURED.volume_step,
-        stops_level=MEASURED.stops_level,
-        freeze_level=MEASURED.freeze_level,
+        digits=measured.digits,
+        point=measured.point,
+        tick_size=measured.tick_size,
+        tick_value=measured.tick_value,
+        contract_size=measured.contract_size,
+        volume_min=measured.volume_min,
+        volume_max=measured.volume_max,
+        volume_step=measured.volume_step,
+        stops_level=measured.stops_level,
+        freeze_level=measured.freeze_level,
     )

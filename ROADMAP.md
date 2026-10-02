@@ -738,6 +738,31 @@ That is the most useful thing Phase 11 has produced, and it cost one day of inve
 find out. The open question is whether the loss is the entries (the rule) or the exits (a
 trailing stop that gives back too much) or simply the size the risk budget demands.
 
+### A second broker, and the same lesson twice
+
+A Markets demo account does not have a `US30`. It has `DowJones30`, quoted to **zero decimals**,
+paying **1.00** per point per lot where Alpari's US30 pays **0.10**.
+
+                    point   digits   value/point/lot
+    Alpari US30      0.1       1          0.10
+    A Markets DJ30   1.0       0          1.00
+
+Ten times apart, and they do not agree on what a point *is*. Carrying one broker's numbers
+into the other is the same class of error as the hand-written guess it replaced — and it is
+why the specification is now keyed by the broker's own symbol name and **raises** for a symbol
+nobody has measured rather than falling back to a default.
+
+A default is precisely the failure this project exists to prevent: a plausible specification
+for a contract nobody looked at, producing confident numbers about it.
+
+What this means for the configuration: every offset, stop and target in
+`config/default.yaml` is in points, so **the same `stop_loss_points: 100` is a $100 stop on A
+Markets and a $10 stop on Alpari**. The position sizer copes — it is told the specification,
+not a lot count — but the numbers are not comparable between brokers.
+
+The alias resolution also did its job: `diagnostics` refused to guess, and named the aliases it
+tried before failing.
+
 ### The headline number cannot be resolved from OHLC bars
 
 The replay publishes each candle's **close** to the venue. Protective levels are checked on

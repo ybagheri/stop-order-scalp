@@ -57,14 +57,33 @@ candle layer, not the strategy, is what has been moving.
 
 ### What Phase 11 must still do
 
-1. **Get a valid demo account**, put `SOS_MT5_LOGIN` and `SOS_MT5_SERVER` in `.env`, and run
+1. **The specification is per broker, and a second broker proved it.** A Markets' `DowJones30`
+   is quoted to **zero decimals** and pays **1.00** per point per lot; Alpari's `US30` is quoted
+   to one decimal and pays **0.10**. Same index, ten times apart, and they do not agree on what
+   a point *is*. The specification is now keyed by the broker's own symbol name and **raises**
+   for an unmeasured symbol rather than falling back to a default — a default here is precisely
+   the failure Phase 11 exists to prevent: a plausible specification for a contract nobody
+   looked at.
+
+   Consequence worth remembering: `stop_loss_points: 100` means a **$100** stop a lot on A
+   Markets and a **$10** stop on Alpari. The position sizer copes, because it is told the
+   specification rather than a lot count — but the configured levels are **not comparable
+   between brokers**.
+
+2. **Get a live demo account**, put `SOS_MT5_LOGIN` and `SOS_MT5_SERVER` in `.env`, and run
    `diagnostics`. Confirm `specification_matches_recorded: true`. A CFD's tick value can move
-   with the underlying index, so this is a live check, not a formality.
-2. **No password is needed, and none is stored.** An already-signed-in terminal attaches to
+   with the underlying index, so this is a live check, not a formality. Three accounts have now
+   been measured and all of them expired shortly after — Alpari's demo credentials are
+   short-lived, which is worth knowing before planning around one.
+3. **No password is needed, and none is stored.** An already-signed-in terminal attaches to
    its own session; `EnvironmentSettings` has no password field by design, and reading a symbol
-   specification must not require a broker credential on disk.
-3. **Nothing has ever placed an order.** The retcode table was written from documentation, and
-   the whole execution path is exercised only against a simulator.
+   specification must not require a broker credential on disk. Verified rather than assumed:
+   `SOS_MT5_PASSWORD` is empty, `mt5_feed.connect` sends credentials only when a password is
+   configured, and `.env` is git-ignored and untracked.
+4. **Nothing has ever placed an order through this project.** The retcode table was written
+   from documentation, and the whole execution path is exercised only against a simulator. (A
+   EURUSD deal appears in the terminal log for account 8039744; that was made in the terminal,
+   not by this project.)
 
 ## What the last three phases cost, and why
 
@@ -72,7 +91,7 @@ candle layer, not the strategy, is what has been moving.
 | --- | --- |
 | 9 | the idempotency guarantee was dead code, and 1116 tests passed |
 | 10 | the venue charged no commission; the clock never moved; closed trades were never recorded |
-| 11 | the tick value was 10x wrong, and the rule loses money on real data |
+| 11 | the tick value was 10x wrong; `aggregate()` invented M15 candles; and the backtest's headline number is a bracket, not a measurement |
 
 Every one of them was found by *running* the thing rather than by reading it, and two of the
 three were invisible to a large green suite. The recurring lesson is in
