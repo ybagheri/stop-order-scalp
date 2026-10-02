@@ -9,63 +9,6 @@ project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
-### Phase 8 — Al Brooks Integration
-
-#### Added
-
-- `integrations/al_brooks_adapter.py` — `AlBrooksAdapter`, `AdaptedDecision`,
-  `AlBrooksRefusal`, `import_engine`. The **only** module permitted to import `albrooks`.
-- `integrations/al_brooks_signal_provider.py` — `AlBrooksSignalProvider`, `ProviderOutcome`,
-  `Source`. Chooses between the M15/M1 baseline and the optional engine.
-- `strategy/signal.py` — `NoTradeReason.AL_BROOKS_VETO`, the only no-trade reason a third
-  party can produce.
-- `docs/integrations/README.md` and `docs/integrations/AL_BROOKS.md`.
-- 57 tests in `tests/integrations/`, all driven by a **fake engine** — `albrooks` is not
-  installed on the development machine, so nothing here has met the real package.
-
-#### Decisions
-
-- **`enabled: true` gives the engine a veto, not a second opinion.** A `WAIT` becomes a
-  `NoTrade` rather than deferring to the baseline. The engine reports
-  `"is_recommendation": False` about its own output, so treating a decline as "ask someone
-  else" would read it as a recommendation it explicitly disclaims. **Enabling the integration
-  can reduce the number of trades**, and there is a test named for exactly that.
-- **`allow_geometry` is a separate switch from `enabled`.** The common case is wanting the
-  engine's direction while keeping this project's own levels; taking both at once would make
-  it impossible to tell which rule set the entry. The geometry source is journalled in the
-  signal's `context`.
-- **Contradictions are refused, not resolved.** The engine carries direction twice — in the
-  action and in the plan — and a disagreement is declined rather than settled in favour of
-  either half. An unrecognised action is refused the same way, so a new upstream action fails
-  closed.
-- **A missing *optional* level is not a refusal.** A plan with a direction but no stop still
-  produces a signal; discarding the good part over a missing extra would be the wrong trade.
-- **The default is inert, and proven inert.** With `enabled: False` the engine is not
-  constructed, imported or consulted — asserted by injecting a factory that raises if called.
-  The import sits inside `import_engine()` so the extra stays optional.
-- **The provider reaches the engine through an injected factory** and cannot name `albrooks`.
-  An AST test — not a substring search, which would match a docstring — asserts it cannot reach
-  `place_order`, `cancel_order`, `modify_position` or `MetaTrader5`, so adding this source does
-  not disturb the Phase 7 send ordering.
-
-#### Fixed
-
-- `allow_geometry` was initially a flag that did nothing: documented as a decision in a
-  docstring and never honoured in code. It now carries the engine's `stop`/`target` on the
-  signal, and the geometry source is recorded.
-- `Price.parse` raises `DomainError`, which does not derive from `ValueError`, so the adapter's
-  `except (ValueError, ArithmeticError)` did not catch a malformed engine price and it
-  propagated as a crash instead of a refusal.
-- `ProviderOutcome` declared its engine cache as a class-level default alongside
-  `__slots__`, so it would have been shared across instances.
-
-#### Not verified
-
-The adapter has never run against the real `albrooks` package. The mapping is written against
-the contract recorded in `docs/architecture/PHASE0_AUDIT.md` §3 rather than observed behaviour.
-A version mismatch fails as a refusal with a named code rather than a wrong trade — by
-construction, not by observation.
-
 ### Phase 7 — Lifecycle and Recovery
 
 #### Added

@@ -536,71 +536,19 @@ refuse-to-overwrite are proved against an injected `OSError`, not a power cut.
 
 ---
 
-## Phase 8 — Al Brooks Integration — `complete`
+## Phase 8 — Al Brooks Integration — `pending`
 
 Implement:
 
 * `integrations/al_brooks_adapter.py`: map `Decision.action` + `Decision.plan` to a
-  domain signal — **done**
-* `integrations/al_brooks_signal_provider.py` — **done**
-* Optional extra `[albrooks]`; the only module importing `albrooks` — **done**, enforced by
-  `check_architecture.py` and restated as a test that walks `src/`
+  domain signal
+* `integrations/al_brooks_signal_provider.py`
+* Optional extra `[albrooks]`; the only module importing `albrooks`
 * **Disabled by default.** The M15/M1 baseline rules remain authoritative unless
-  `integrations.al_brooks.enabled` is explicitly true — **done**, and asserted by injecting a
-  factory that *raises* if called
-* Never invent signals; a `WAIT`/`NO_TRADE` decision is not a signal — **done**
+  `integrations.al_brooks.enabled` is explicitly true
+* Never invent signals; a `WAIT`/`NO_TRADE` decision is not a signal
 
 Gate: adapter tests using a fake engine, commit, push.
-
-### Decisions taken
-
-1. **`enabled: true` gives the engine a veto, not a second opinion to fall back on.** A `WAIT`
-   becomes `NoTrade` rather than deferring to the baseline. The engine reports
-   `"is_recommendation": False` about its own output, so treating a decline as "ask someone
-   else" would read it as a recommendation it explicitly disclaims. Stated as a test because it
-   surprises people: **enabling the integration can reduce the number of trades**, and that is
-   the point of a filter.
-2. **`allow_geometry` is a separate switch from `enabled`.** The common case is wanting the
-   engine's direction while keeping this project's own levels. Taking both at once would make
-   it impossible to tell which rule set the entry, and an untraceable level is one nobody can
-   debug. The geometry source is recorded in the signal's `context`.
-3. **Contradictions are refused, not resolved.** The engine carries direction twice — in the
-   action and in the plan — and the adapter declines when they disagree rather than picking a
-   winner. An unrecognised action is refused for the same reason: a new upstream action must
-   fail closed.
-4. **A missing *optional* level is not a refusal.** A plan with a direction but no stop still
-   produces a signal; discarding the part that is good over a missing extra would be the wrong
-   trade.
-5. **The default is inert, and proven inert.** With `enabled: False` the engine is not
-   constructed, not imported and not consulted. The import sits inside `import_engine()` for
-   the same reason `MetaTrader5`'s does, and a test asserts that importing the adapter does not
-   put `albrooks` in `sys.modules`.
-6. **The provider reaches the engine through an injected factory** and cannot even name
-   `albrooks`. An AST test — not a substring search, which would match a docstring — asserts it
-   cannot reach `place_order`, `cancel_order`, `modify_position` or `MetaTrader5`. So enabling
-   the integration does not disturb the Phase 7 invariant that every send goes through
-   `place_order`'s ordering.
-7. **The baseline is evaluated even when the engine is enabled.** It costs nothing, and it lets
-   an operator see what the engine vetoed instead of discovering it by counting orders.
-
-### Defects found and fixed during Phase 8
-
-* `allow_geometry` was initially a flag that did nothing — documented as a decision in the
-  adapter's docstring and never honoured in code. Worse than not having it. It now carries the
-  engine's own `stop`/`target` on the signal, and the geometry source is journalled.
-* `Price.parse` raises `DomainError`, which does not derive from `ValueError`, so the
-  adapter's `except (ValueError, ArithmeticError)` did not catch a malformed engine price and
-  it propagated as a crash instead of a refusal.
-* `ProviderOutcome` declared `_engine` as a class-level default alongside `__slots__`, so the
-  cache would have been shared across instances.
-
-### Not verified
-
-`albrooks` is not installed on the development machine, so the adapter has never run against
-the real package. The mapping is written against the contract recorded in
-`docs/architecture/PHASE0_AUDIT.md` §3, not against observed behaviour. A version mismatch
-fails as a refusal with a named code rather than a wrong trade — by construction, not by
-observation.
 
 ---
 

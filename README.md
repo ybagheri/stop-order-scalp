@@ -7,11 +7,11 @@
 > **Status: under active development.** See [`ROADMAP.md`](ROADMAP.md) for what exists
 > today and [`HANDOFF.md`](HANDOFF.md) for the state of the last completed phase.
 >
-> **Phases 1–8 complete** (foundation, market data, core strategy, risk engine, order
-> execution, position management, lifecycle and recovery, and the optional Al Brooks integration).
-> The domain layer, configuration, logging, the MetaTrader 5 feed, the closed-candle freeze,
-> the M15/M1 baseline decision, the position sizer, the idempotent order manager, the
-> monotonic trailing stop and the write-intent lifecycle are implemented and tested — **1143 tests, no broker required**. Of
+> **Phases 1–7 complete** (foundation, market data, core strategy, risk engine, order
+> execution, position management, lifecycle and recovery). The domain layer, configuration,
+> logging, the MetaTrader 5 feed, the closed-candle freeze, the M15/M1 baseline decision, the
+> position sizer, the idempotent order manager, the monotonic trailing stop and the
+> write-intent lifecycle are implemented and tested — **1082 tests, no broker required**. Of
 > the seven CLI commands below, `validate-config` and `test-connection` work; the rest exit
 > **4** and say which phase has not landed. The command surface is fixed ahead of its
 > implementations on purpose, so the contract is testable now.
@@ -54,7 +54,6 @@ into the strategy, risk, or lifecycle code.
 | [`docs/execution/`](docs/execution/) | Order identity, idempotency, error classification |
 | [`docs/trailing/`](docs/trailing/) | Break-even, the trailing rule, monotonicity |
 | [`docs/lifecycle/`](docs/lifecycle/) | Write-intent ledger, transition table, restart recovery |
-| [`docs/integrations/`](docs/integrations/) | The optional Al Brooks signal source, disabled by default |
 | [`docs/mt5/`](docs/mt5/) | MT5 setup, symbol specifications, dry-run |
 | [`docs/testing/`](docs/testing/) | Test layout, property tests, how to run |
 | [`docs/operations/`](docs/operations/) | Deployment, troubleshooting, recovery |
@@ -106,7 +105,7 @@ Part of the contract, because a supervisor process depends on them.
 ## Development
 
 ```bash
-python -m pytest                             # 1143 tests
+python -m pytest                             # 1082 tests
 python -m ruff check .                       # lint
 python -m mypy                               # types, strict, src + tests
 python scripts/check_architecture.py         # architecture boundaries
@@ -239,13 +238,6 @@ interval in which an order could exist at the venue and be unknown locally. The 
 "starts fresh": an unreadable state file raises rather than yielding an empty one, because an
 empty ledger is exactly the condition under which duplicate orders appear. See
 [`docs/lifecycle/LIFECYCLE.md`](docs/lifecycle/LIFECYCLE.md).
-
-**The optional third-party engine has a veto, not a vote.** When it is enabled and returns
-`WAIT`, that becomes *no trade* rather than a fallback to the baseline — the engine states
-`"is_recommendation": false` about its own output, so treating a decline as "ask someone else"
-would read it as a recommendation it explicitly disclaims. So enabling it can *reduce* the
-number of trades, and it is off by default: the engine is not even constructed unless an
-operator asks for it. See [`docs/integrations/AL_BROOKS.md`](docs/integrations/AL_BROOKS.md).
 
 See [`docs/architecture/ARCHITECTURE.md`](docs/architecture/ARCHITECTURE.md),
 [`docs/strategy/ENTRY_RULES.md`](docs/strategy/ENTRY_RULES.md),
