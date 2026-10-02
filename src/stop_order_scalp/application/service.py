@@ -57,6 +57,7 @@ from stop_order_scalp.market_data.candles import (
     freeze_closed_bars,
     load_candles_csv,
 )
+from stop_order_scalp.market_data.symbols import MEASURED, us30_specification
 from stop_order_scalp.market_data.timeframes import period_seconds
 from stop_order_scalp.risk.risk_manager import RiskManager, RiskRequest
 from stop_order_scalp.strategy.strategy import StopOrderStrategy, StrategyContext
@@ -72,34 +73,11 @@ __all__ = [
 #: The specification used when no broker is connected. Deliberately labelled *assumed* --
 #: Phase 11 replaces it with the real one. Every risk figure this project reports is stated
 #: against these numbers and nothing else.
-ASSUMED_POINT = Decimal("0.1")
-ASSUMED_TICK_VALUE = Decimal("1.0")
-ASSUMED_CONTRACT_SIZE = Decimal("1.0")
 
 #: A starting balance for the dry run. Named ``assumed`` for the same reason.
 ASSUMED_BALANCE = Decimal("10000")
-
-
-def assumed_specification(symbol: str, digits: int = 1) -> SymbolSpecification:
-    """The project's assumed US30 numbers, for a run with no broker attached.
-
-    Not a default that hides a problem: it is the same object every Phase 4 test states its
-    arithmetic against, and ``docs/mt5/SYMBOL_SPECIFICATIONS.md`` works the same numbers by
-    hand.
-    """
-    return SymbolSpecification(
-        name=symbol,
-        digits=digits,
-        point=ASSUMED_POINT,
-        tick_size=ASSUMED_POINT,
-        tick_value=ASSUMED_TICK_VALUE,
-        contract_size=ASSUMED_CONTRACT_SIZE,
-        volume_min=Decimal("0.1"),
-        volume_max=Decimal("50.0"),
-        volume_step=Decimal("0.1"),
-        stops_level=10,
-        freeze_level=0,
-    )
+#: The simulated venue's spread. One point, the measured minimum increment.
+SPREAD_POINTS = Decimal("1")
 
 
 @dataclass
@@ -327,7 +305,7 @@ class TradingService:
         self.broker.publish(
             self.strategy.symbol,
             close,
-            close + ASSUMED_POINT,
+            close + SPREAD_POINTS * MEASURED.point,
             digits=self.specification.digits,
         )
 
@@ -356,7 +334,7 @@ def build_service(
     del paper, dry_run  # A dry run is the only mode this module builds.
 
     symbol = config.strategy.symbol
-    specification = assumed_specification(symbol)
+    specification = us30_specification(symbol)
     # The venue must charge the commission the configuration states, or the two halves of the
     # system disagree about the cost of a trade: the risk engine sizes the position *net* of
     # `commission_per_lot`, and a venue charging nothing books the full gross as profit. Every

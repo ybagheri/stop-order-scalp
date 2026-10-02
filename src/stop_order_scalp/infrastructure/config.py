@@ -58,7 +58,6 @@ __all__ = [
     "EntrySettings",
     "ExecutionSettings",
     "FilterSettings",
-    "IntegrationSettings",
     "LoggingSettings",
     "OrderSettings",
     "ProjectPaths",
@@ -488,23 +487,6 @@ class StateSettings:
 
 
 @dataclass(frozen=True, slots=True)
-class AlBrooksSettings:
-    enabled: bool = False
-    allow_geometry: bool = False
-
-    def __post_init__(self) -> None:
-        if self.allow_geometry and not self.enabled:
-            raise ConfigError(
-                "integrations.al_brooks.allow_geometry requires integrations.al_brooks.enabled"
-            )
-
-
-@dataclass(frozen=True, slots=True)
-class IntegrationSettings:
-    al_brooks: AlBrooksSettings = field(default_factory=AlBrooksSettings)
-
-
-@dataclass(frozen=True, slots=True)
 class FilterSettings:
     """Optional, disabled-by-default filters.
 
@@ -629,7 +611,6 @@ class AppConfig:
     execution: ExecutionSettings
     logging: LoggingSettings
     state: StateSettings
-    integrations: IntegrationSettings
     paths: ProjectPaths
     #: Which files contributed, for ``validate-config`` and ``diagnostics``.
     sources: tuple[Path, ...] = ()
@@ -737,7 +718,6 @@ def load_config(
     strategy = _build_strategy(raw)
     logging_settings = _coerce(LoggingSettings, dict(raw.get("logging") or {}), "logging")
     state_settings = _coerce(StateSettings, dict(raw.get("state") or {}), "state")
-    integrations = _build_integrations(raw)
 
     paths = ProjectPaths.resolve(
         root=discovered_root,
@@ -769,7 +749,6 @@ def load_config(
         execution=execution,
         logging=logging_settings,
         state=state_settings,
-        integrations=integrations,
         paths=paths,
         sources=tuple(sources),
     )
@@ -844,7 +823,6 @@ def _reject_unknown_keys(raw: Mapping[str, Any], path: Path) -> None:
         "execution",
         "logging",
         "state",
-        "integrations",
         "filters",
     }
     unknown = sorted(set(raw) - allowed)
@@ -870,7 +848,6 @@ def _reject_unknown_keys(raw: Mapping[str, Any], path: Path) -> None:
         "execution": {"magic_number", "poll_interval_seconds", "retry"},
         "logging": {"level", "directory"},
         "state": {"path", "journal_limit"},
-        "integrations": {"al_brooks"},
         "filters": {
             "max_spread_points",
             "min_atr_points",
@@ -892,15 +869,6 @@ def _reject_unknown_keys(raw: Mapping[str, Any], path: Path) -> None:
         if unknown_nested:
             raise ConfigError(f"{path}: unknown keys under '{section}': {unknown_nested}")
 
-    integrations_raw = raw.get("integrations")
-    if isinstance(integrations_raw, dict):
-        al_brooks = integrations_raw.get("al_brooks")
-        if al_brooks is not None:
-            if not isinstance(al_brooks, dict):
-                raise ConfigError(f"{path}: 'integrations.al_brooks' must be a mapping")
-            unknown_al = sorted(set(al_brooks) - {"enabled", "allow_geometry"})
-            if unknown_al:
-                raise ConfigError(f"{path}: unknown keys under 'integrations.al_brooks': {unknown_al}")
 
     execution_raw = raw.get("execution")
     if isinstance(execution_raw, dict):
@@ -1074,13 +1042,6 @@ def _build_strategy(raw: Mapping[str, Any]) -> StrategySettings:
         order=_coerce(OrderSettings, dict(raw.get("order") or {}), "order"),
         filters=_coerce(FilterSettings, dict(raw.get("filters") or {}), "filters"),
     )
-
-
-def _build_integrations(raw: Mapping[str, Any]) -> IntegrationSettings:
-    al_brooks = _coerce(
-        AlBrooksSettings, dict((raw.get("integrations") or {}).get("al_brooks") or {}), "integrations.al_brooks"
-    )
-    return IntegrationSettings(al_brooks=al_brooks)
 
 
 def _build_environment(values: Mapping[str, Any], *, default_magic: int) -> EnvironmentSettings:

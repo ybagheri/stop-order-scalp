@@ -676,39 +676,112 @@ take profit.
 
 ---
 
-## Phase 11 — Demo Validation — `pending`
+## Phase 11 — Demo Validation — `in progress`
 
-A real MetaTrader 5 **demo** account. The `metatrader5` package (5.0.6231) is now installed
-on the development machine, but no terminal has been connected, so every wire value, retcode
-and specification this project uses is still unverified against reality — the classification table and the broker-limit semantics in particular.
+The specification is **measured**. The account is **not currently valid**. Both matter more
+than the phase label.
 
-Implement:
+### The tick value was wrong by a factor of ten
 
-* capture the real `US30` specification and replace the assumed one
-* verify the retcode table against actual failures
-* run the dry run against a demo terminal and compare it to the backtest
+The specification was hand-written for ten phases. Alpari's terminal says otherwise:
 
-Nothing in this project should touch a **live** account until Phase 11 has run for long
-enough to mean something. `LIVE` is gated three times over and that is not decoration.
+| | assumed | measured |
+| --- | --- | --- |
+| `tick_value` | 1.0 | **0.1** |
+| `volume_min` | 0.1 | **0.01** |
+| `volume_max` | 50.0 | **300.0** |
+| `volume_step` | 0.1 | **0.01** |
+| `stops_level` | 10 | **0** |
 
----
+`tick_value` is the number every money figure in this project scales with, so the two errors
+pointed opposite ways, which is the worst combination:
 
-## Later — combining with another method
+- every reported P/L figure was **ten times too large**
+- every position was **a tenth of the intended risk** — 0.4 lots where the correct answer is 3.12
 
-Recorded because it is a stated intent, not because it is planned. When it happens:
+The same fixture, before and after, with nothing changed but the numbers:
 
-* the baseline must remain available, so the two can be compared rather than assumed additive;
-* a signal source may **veto**, and it may not quietly become the only source;
-* every switch defaults to off, and a switch that is off changes nothing at all.
+| | assumed tick value | measured |
+| --- | --- | --- |
+| net profit | +462.00 | **+38.29** |
+| profit factor | 3.67 | **1.12** |
+| max drawdown | 78.04 | **212.70** |
+| commission | 45.60 | **358.92** |
+| win rate | 47.4% | **42.1%** |
 
-`docs/architecture/ARCHITECTURE.md` §2 keeps `integrations` as a layer for exactly this, and
-`domain/interfaces.py` already declares the protocols a new source would implement.
+A profit factor of 3.67 was 1.12. The figure quoted in Phase 10's commit message was about
+twelve times more flattering than reality.
 
----
+The specification now lives in `market_data/symbols.py`, in one place, with its capture date
+and source attached. It was duplicated in two modules before, which is how it survived
+unchanged for so long; and it was named `assumed_...`, which taught every reader to discount
+it. It is now named for what it is.
 
-## Out of scope (documented, not forbidden)
+### The first backtest on real data: it loses money
 
-* Multi-instrument trading — the instrument policy is US30-only by specification
-* MQL5 EA implementation — only if a future phase proves the native Python API is
-  unreliable for order placement (§5.1 of the audit)
-* Tick-by-tick latency arbitrage
+30 022 real US30 M1 bars, one month, exported read-only from the terminal:
+
+```
+trades  9 closed, 2 winners, 7 losers, win rate 22.2%
+net     -219.82 on 10,000  (-2.2%)
+profit  factor 0.21
+commission 166.32, against a gross profit of 57.36
+max drawdown  298.97
+exits   all nine via the trailing stop
+```
+
+**This is a real result and it is negative.** The rule as configured does not work on real
+US30 data, and the commission is nearly three times the gross profit — at 3 lots with a $6
+round trip, trading this frequently is structurally unprofitable regardless of the entries.
+
+That is the most useful thing Phase 11 has produced, and it cost one day of invented candles to
+find out. The open question is whether the loss is the entries (the rule) or the exits (a
+trailing stop that gives back too much) or simply the size the risk budget demands.
+
+### The replay was quadratic and unusable on real data
+
+A month of M1 bars took **over twenty-five minutes**. `freeze_closed_bars` sorts and
+re-validates whatever it is given, and the replay handed it the whole series on every cycle:
+O(n^2), with `is_closed_at` called 4.6 million times over 3 000 cycles.
+
+Cutting the *end* of what the freeze sees (`candles[:index + 2]`) is a large improvement and
+still quadratic — the prefix grows with the reference. Cutting the *start* too, to the
+`lookback` bars the strategy can actually see, makes it linear. **5.1 seconds** for 30 022
+bars, a 100x improvement.
+
+The freeze still decides what is closed; `_prefix` only bounds how much it is asked to look at.
+The series is validated in full once, up front, so a duplicated timestamp at bar 29 000 is
+still an error rather than out of scope.
+
+### The account stopped being valid
+
+The terminal connected and authorised at 12:16, and this was captured while it did. At 13:37
+the log says:
+
+```
+'53137121': disconnected from Alpari-MT5-Demo
+'53137121': authorization on Alpari-MT5-Demo failed (Invalid account)
+```
+
+and it has failed that way since, across a terminal restart. A demo account's credentials have
+not changed — Alpari has retired it. Nothing in this project can fix that, and no amount of
+code change would make `test-connection` succeed.
+
+**To resume:** a working demo account, and `SOS_MT5_LOGIN` / `SOS_MT5_SERVER` in `.env`. No
+password is needed, because an already-signed-in terminal attaches to its own session — the
+project deliberately stores no broker credential, and reading a symbol specification must not
+require one.
+
+### What is left for whoever continues
+
+1. A valid demo account, then re-run `diagnostics` and confirm
+   `specification_matches_recorded: true`. A CFD's tick value can move with the underlying
+   index, so this check is not a formality.
+2. `status` and `diagnostics` are built. The contract is complete: seven commands, no exit-4
+   holes.
+3. Investigate the negative result before changing the rule. The commission-to-gross ratio says
+   the position size is the problem before the entries are; that is the cheaper thing to test
+   and the one to rule out first.
+4. Nothing has ever placed an order. The execution path is exercised against a simulator and a
+   dry run, and the retcode table was written from documentation rather than observed.
+

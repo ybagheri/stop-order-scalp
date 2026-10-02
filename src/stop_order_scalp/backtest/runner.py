@@ -15,10 +15,11 @@ from decimal import Decimal
 from pathlib import Path
 from typing import Any
 
-from stop_order_scalp.backtest.replay import assumed_specification, replay
+from stop_order_scalp.backtest.replay import replay
 from stop_order_scalp.domain.exceptions import ConfigError
 from stop_order_scalp.infrastructure.config import AppConfig
 from stop_order_scalp.market_data.candles import aggregate, load_candles_csv
+from stop_order_scalp.market_data.symbols import MEASURED
 
 __all__ = ["run_backtest_from_args"]
 
@@ -46,7 +47,7 @@ def run_backtest_from_args(args: argparse.Namespace, config: AppConfig) -> dict[
     # would put the symbol's precision in two places that could disagree -- and a replay that
     # parsed prices at a different precision than the venue quotes them would fill orders at
     # levels that do not exist.
-    digits = assumed_specification(config.strategy.symbol, config=config).digits
+    digits = MEASURED.digits
     candles = load_candles_csv(path, timeframe=timeframe, digits=digits)
     if not candles:
         raise ConfigError(f"{path} contained no usable rows")

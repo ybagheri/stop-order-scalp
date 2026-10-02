@@ -151,21 +151,41 @@ class MT5Feed:
     def connect(self, settings: EnvironmentSettings) -> None:
         """Start or attach to the terminal. Idempotent.
 
-        Credentials are optional: with none supplied the terminal uses its own saved
-        session, which is the normal case for an already-logged-in installation.
+        Credentials are optional, and the docstring above used to say so without the code
+        agreeing: it passed ``login``/``password``/``server`` unconditionally, so a terminal
+        that was already signed in still got a login attempt with an empty password -- and
+        MetaTrader 5 answers that with error ``-2, Invalid "password" argument`` rather than
+        falling back to the saved session. The result was that a working, authenticated,
+        already-running terminal reported as unreachable.
+
+        So credentials are now passed **only when a password is actually configured**. With
+        none, ``initialize(path=...)`` attaches to the terminal's own session, which is both
+        the normal case and the safer one: reading a symbol specification should not require
+        storing a broker password anywhere on disk.
 
         :raises BrokerNotConnectedError: if the terminal refuses, with the terminal's own
             error code and message attached.
         """
         api = self._module.api()
-        ok = api.initialize(
-            path=settings.mt5_path,
-            login=settings.mt5_login,
-            password=_password(),
-            server=settings.mt5_server,
-            timeout=settings.mt5_timeout_ms,
-            portable=False,
-        )
+        password = _password()
+        if password:
+            ok = api.initialize(
+                path=settings.mt5_path,
+                login=settings.mt5_login,
+                password=password,
+                server=settings.mt5_server,
+                timeout=settings.mt5_timeout_ms,
+                portable=False,
+            )
+        else:
+            # No password stored: attach to whatever session the terminal already has. An
+            # empty password is not the same as no password to MetaTrader 5, and it is
+            # rejected as invalid rather than ignored.
+            ok = api.initialize(
+                path=settings.mt5_path,
+                timeout=settings.mt5_timeout_ms,
+                portable=False,
+            )
         if not ok:
             code, message = self._module.describe_last_error()
             raise BrokerNotConnectedError(

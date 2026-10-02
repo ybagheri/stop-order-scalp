@@ -40,6 +40,7 @@ provenance is not a result.
 
 from __future__ import annotations
 
+import bisect
 from collections.abc import Sequence
 from dataclasses import dataclass, field
 from datetime import UTC, datetime, timedelta
@@ -65,21 +66,19 @@ from stop_order_scalp.infrastructure.config import AppConfig
 from stop_order_scalp.infrastructure.persistence import StateLedger
 from stop_order_scalp.lifecycle.trade_lifecycle import TradeLifecycle
 from stop_order_scalp.market_data.candles import aggregate, freeze_closed_bars
+from stop_order_scalp.market_data.symbols import us30_specification
 from stop_order_scalp.market_data.timeframes import period_seconds
 from stop_order_scalp.risk.risk_manager import RiskManager, RiskRequest
 from stop_order_scalp.strategy.strategy import StopOrderStrategy, StrategyContext
 
-__all__ = ["ReplayResult", "ReplayStep", "assumed_specification", "replay"]
+__all__ = ["ReplayResult", "ReplayStep", "replay"]
 
 #: The point value and balance a replay starts from when the configuration does not say.
 #:
 #: Both are *assumptions*, and both are reported in the result. A replay whose arithmetic
 #: depends on a guessed tick value must not be quotable without the guess attached, so
 #: ``ReplayResult.to_dict`` carries them into the output rather than leaving them in the code.
-ASSUMED_POINT = Decimal("0.1")
 ASSUMED_BALANCE = Decimal("10000")
-ASSUMED_TICK_VALUE = Decimal("1.0")
-ASSUMED_CONTRACT_SIZE = Decimal("1.0")
 
 
 @dataclass(frozen=True, slots=True)
@@ -181,7 +180,8 @@ def replay(
     settings = EnvironmentSettings(
         environment=Environment.DRY_RUN, allow_live=False, allow_order=False
     )
-    specification = assumed_specification(symbol, config=config)
+    specification = us30_specification(symbol)
+    _venue(specification, config)
 
     broker = SimulatedBroker(settings, balance=starting_balance)
     broker.connect()
@@ -224,8 +224,21 @@ def replay(
     series_m15 = list(
         m15_candles
         if m15_candles is not None
-        else aggregate(series_m1, config.strategy.entry.timeframe, config.strategy.entry.direction_timeframe)
+        else aggregate(
+            series_m1,
+            config.strategy.entry.timeframe,
+            config.strategy.entry.direction_timeframe,
+        )
     )
+    # Validate both series in full, once, before the first cycle slices into them. The
+    # per-cycle path only shows the freeze part of the data, so this is what keeps a
+    # duplicated timestamp at the end of a 30 000-bar file an error rather than silence.
+    _validate_series(series_m1)
+    _validate_series(series_m15)
+
+    # Open times, once. `_prefix` bisects into these on every cycle.
+    times_m1 = [candle.open_time for candle in series_m1]
+    times_m15 = [candle.open_time for candle in series_m15]
 
     steps: list[ReplayStep] = []
     curve: list[EquityPoint] = []
@@ -241,8 +254,8 @@ def replay(
         reference += timedelta(seconds=step_seconds)
         if reference > horizon:
             break
-        window_m1 = _closed_window(series_m1, reference, lookback)
-        window_m15 = _closed_window(series_m15, reference, lookback)
+        window_m1 = _closed_window(series_m1, times_m1, reference, lookback)
+        window_m15 = _closed_window(series_m15, times_m15, reference, lookback)
         if not window_m1 or not window_m15:
             break
 
@@ -342,16 +355,75 @@ def _first_reference(candles: Sequence[Candle], config: AppConfig) -> datetime:
 
 
 def _closed_window(
-    candles: Sequence[Candle], reference: datetime, lookback: int
+    candles: Sequence[Candle],
+    open_times: Sequence[datetime],
+    reference: datetime,
+    lookback: int,
 ) -> list[Candle]:
     """The last ``lookback`` bars closed at ``reference``. Nothing after it.
 
-    The freeze is the only thing permitted to decide what is closed. That is what makes this
-    a walk forward rather than a look-ahead: there is no path in this module by which a bar
-    later than ``reference`` can reach the strategy.
+    The freeze is the only thing permitted to decide what is closed. That is what makes this a
+    walk forward rather than a look-ahead: there is no path in this module by which a bar later
+    than ``reference`` can reach the strategy.
+
+    **The freeze is still what decides** -- ``_prefix`` only bounds how much of the series it is
+    asked to look at, and any bar it cut off would have been dropped by the freeze anyway. It is
+    a performance hint, not a second copy of the closure rule, and the authority stays where it
+    is. Handing the freeze the whole 30 000-bar series on every one of 30 000 cycles is
+    O(n^2): it sorts and re-validates each time, and a one-month replay took over twenty-five
+    minutes. The series is validated in full once, in :func:`_validate_series`, so nothing is
+    skipped -- only repeated.
     """
-    closed, _ = freeze_closed_bars(candles, reference=reference)
+    closed, _ = freeze_closed_bars(
+        _prefix(candles, open_times, reference, lookback), reference=reference
+    )
     return list(closed[-lookback:])
+
+
+def _prefix(
+    candles: Sequence[Candle],
+    open_times: Sequence[datetime],
+    reference: datetime,
+    lookback: int,
+) -> Sequence[Candle]:
+    """The only bars worth handing the freeze at this reference.
+
+    A bar is closed at ``reference`` only if its own period had elapsed, so on an ascending
+    series every closed bar starts at or before ``reference - period``. Everything from index 0
+    to there is irrelevant: the caller keeps the last ``lookback`` closed bars, and the strategy
+    only ever sees those. So the window is ``lookback`` bars before the cutoff, plus two after
+    it so the freeze still sees -- and still reports -- the bar in progress. A cut that hid the
+    forming bar would make ``FreezeReport`` claim nothing was forming.
+
+    Both bounds matter, and the first one is the one that is easy to miss. Returning
+    ``candles[:index + 2]`` is already a large improvement on handing over the whole series, and
+    it is still O(n^2): the prefix grows with the reference, so a 3 000-cycle replay called
+    ``is_closed_at`` 4.6 million times. Cutting the *start* as well makes it O(n · lookback).
+
+    ``open_times`` is passed in rather than computed here, because it is the same on every
+    cycle. Rebuilding it per call is O(n) per cycle and undoes the whole thing: on a one-month
+    file that is the difference between seconds and minutes.
+    """
+    period = timedelta(seconds=period_seconds(_timeframe_of(candles)))
+    cutoff = reference - period
+    index = bisect.bisect_right(open_times, cutoff)
+    return candles[max(0, index - lookback) : index + 2]
+
+
+def _timeframe_of(candles: Sequence[Candle]) -> str:
+    return candles[0].timeframe if candles else "M1"
+
+
+def _validate_series(candles: Sequence[Candle]) -> None:
+    """Check the whole series once, up front.
+
+    The per-cycle path slices, so the duplicate and mixed-timeframe checks in the freeze only
+    ever see part of the data. Running the freeze once across everything means the series is
+    still validated in full -- a duplicated timestamp in bar 29 000 is still an error -- instead
+    of being silently out of scope.
+    """
+    if candles:
+        freeze_closed_bars(candles, reference=datetime.max.replace(tzinfo=UTC))
 
 
 def _publish(
@@ -446,42 +518,19 @@ def _detail(step: Any, broker: SimulatedBroker, fallback: str) -> str:
     return fallback
 
 
-def assumed_specification(
-    symbol: str, digits: int = 1, config: AppConfig | None = None
-) -> SymbolSpecification:
-    """A specification to compute with, and an admission that it is a guess.
+def _venue(specification: SymbolSpecification, config: AppConfig) -> None:
+    """Apply the measured specification *and* the configured commission to the venue.
 
-    The real US30 contract size and tick value are unknown to this project, and every money
-    figure a replay produces scales with them. Guessing is unavoidable; guessing *quietly* is
-    not, so the values travel with the result.
-
-    ``config``, when given, also applies the configured commission to the venue. Without it
-    the venue charges nothing while the risk engine sizes the position net of commission, and
-    the two halves then disagree about what a trade cost -- which shows up as a profit figure
-    that is too high by exactly the commission the sizing already subtracted.
+    Both halves, because they fail in the same direction. A venue that keeps a stale
+    specification reports a profit figure scaled by the wrong tick value, and a venue that
+    charges no commission while the risk engine sizes positions net of commission reports one
+    that is too high by exactly the cost already accounted for. Both flatter the strategy, which
+    is the direction this project must never be wrong in.
     """
     from stop_order_scalp.execution.simulated_broker import configure_specification
 
-    specification = SymbolSpecification(
-        name=symbol,
-        digits=digits,
-        point=ASSUMED_POINT,
-        tick_size=ASSUMED_POINT,
-        tick_value=ASSUMED_TICK_VALUE,
-        contract_size=ASSUMED_CONTRACT_SIZE,
-        volume_min=Decimal("0.1"),
-        volume_max=Decimal("50.0"),
-        volume_step=Decimal("0.1"),
-        stops_level=10,
-        freeze_level=0,
+    configure_specification(
+        specification,
+        commission=config.strategy.risk.commission_per_lot,
+        commission_mode=config.strategy.risk.commission_mode,
     )
-    risk = None if config is None else config.strategy.risk
-    if risk is None:
-        configure_specification(specification)
-    else:
-        configure_specification(
-            specification,
-            commission=risk.commission_per_lot,
-            commission_mode=risk.commission_mode,
-        )
-    return specification

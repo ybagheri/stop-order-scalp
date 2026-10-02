@@ -245,7 +245,12 @@ def _cmd_status(args: argparse.Namespace, config: AppConfig, out: TextIO, err: T
 
     report = collect_status(config)
     _emit(out, report)
-    return EXIT_OK if report["reachable"] or report["environment"] == "DRY_RUN" else EXIT_NOT_CONNECTED
+    # The contract this handler has always had, and which `collect_status` was written
+    # against from the start: DRY_RUN is reachable by definition because its venue is
+    # simulated, so the key is true even with no terminal anywhere near the machine. The old
+    # handler raised KeyError on a report that did not carry it, which is a worse failure than
+    # the exit code it was trying to produce.
+    return EXIT_OK if report.get("reachable", True) else EXIT_NOT_CONNECTED
 
 
 def _cmd_test_connection(args: argparse.Namespace, config: AppConfig, out: TextIO, err: TextIO) -> int:

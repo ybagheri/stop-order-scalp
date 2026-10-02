@@ -140,16 +140,6 @@ state:
   # Keep this many closed trades in the journal.
   journal_limit: 500
 
-integrations:
-  al_brooks:
-    # Disabled by default. The M15/M1 baseline is authoritative until this is explicitly
-    # enabled AND the strategy is re-validated. See docs/architecture/ARCHITECTURE.md.
-    enabled: false
-    # What the engine is allowed to contribute when enabled.
-    #   none      -- direction only
-    #   geometry  -- direction, stop and target
-    allow_geometry: false
-
 filters:
   # All filters are optional and disabled by default. Baseline behaviour is unchanged
   # with every one of them off. See docs/research/README.md.

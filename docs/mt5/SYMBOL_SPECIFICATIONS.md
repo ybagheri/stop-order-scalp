@@ -1,5 +1,27 @@
 # US30 Symbol Specification
 
+
+> ## Measured, 2026-10-02 — the values below are now WRONG
+>
+> Read [`MEASURED_US30.json`](MEASURED_US30.json) for the captured values, and
+> `market_data/symbols.py` for the ones the code uses. The table further down is the original
+> hand-written estimate, kept because the difference is the point:
+>
+> | | was assumed | measured on Alpari MT5 |
+> | --- | --- | --- |
+> | `tick_value` | 1.0 | **0.1** |
+> | `volume_min` | 0.1 | **0.01** |
+> | `volume_max` | 50.0 | **300.0** |
+> | `volume_step` | 0.1 | **0.01** |
+> | `stops_level` | 10 | **0** |
+>
+> `tick_value` is what every money figure in this project scales with, so the mistake pointed
+> both ways at once: reported P/L was ten times too large, and every position was a tenth of
+> the intended risk. On the committed sample fixture, with nothing changed but these numbers,
+> the net result went from **+462.00 to +38.29** and the profit factor from **3.67 to 1.12**.
+>
+> Measured from: Alpari MT5 build 6230, account 53137121, `Alpari-MT5-Demo`, symbol `US30`.
+
 > **These numbers are assumed, not measured.** They are the project's working assumption
 > until Phase 11 captures the real values from a live Alpari terminal. Every risk
 > calculation in the test suite is stated against them, and none of them has been verified

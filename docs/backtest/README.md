@@ -55,14 +55,42 @@ trades : {"closed": 19, "wins": 9, "losses": 10, "scratches": 0,
 
 Two fields are `null` rather than `0` on purpose. "No trades" and "every trade lost" are
 different facts, and a zero reports the first as the second. Same for a profit factor with no
-losses: the ratio is undefined, and `inf` would be an artefact of dividing by zero wearing the
-costume of a result.
+losses: the ratio is undefined, and `inf` would be an artefact of dividing by zero dressed as
+a result.
 
 Every trade in the report comes from `SimulatedBroker.history()` — the venue's own record of
 what it closed, written at the moment of closure. Nothing is reconstructed from the plans, and
 no exit level is read from an intent. That is not fastidiousness: the dry-run report once
 printed `planned 0.4 lots at 40006.3` beside a stop that had moved to 40011.7, and a statistic
 computed from intended exits is that same bug with more decimal places.
+
+## On real data, the rule loses money
+
+30 022 real US30 M1 bars — one month, exported read-only from Alpari MT5:
+
+```
+trades  9 closed · 2 winners · 7 losers · win rate 22.2%
+net     -219.82 on 10,000   (-2.2%)
+profit  factor 0.21
+commission  166.32   against a gross profit of 57.36
+drawdown  298.97
+exits    all nine via the trailing stop
+```
+
+**This is a real, negative result.** The rule as configured does not work on real US30 data.
+
+The commission is the loudest signal in it: at 3 lots with a $6 round trip, costs are nearly
+three times the gross profit. That is a structural problem with trading this size this often,
+and it holds *before* you ask whether the entries are any good. So the cheap question to rule
+out first is the size, not the strategy.
+
+Run it yourself:
+
+```bash
+python -m stop_order_scalp backtest --data path/to/real_us30_m1.csv
+```
+
+A month of M1 bars takes about five seconds.
 
 ## What this does not tell you
 
@@ -72,10 +100,11 @@ as a result by anyone who does not read this page.
 
 Three further limits, all reported in the output rather than buried here:
 
-- **The symbol specification is a guess.** Point `0.1`, tick value `1.0` per lot, contract
-  size `1.0`. Every money figure scales with the tick value, so on a real US30 contract the
-  same replay reports a very different number. The guess travels with the report for that
-  reason.
+- **The symbol specification is a broker value, not a fact.** It was measured from Alpari MT5
+  on 2026-10-02 and lives in `market_data/symbols.py` with its source attached. A different
+  broker would differ, and a CFD's tick value can move with the underlying index — so
+  `diagnostics` re-reads the live values on every run and warns when they disagree with the
+  recorded ones. Every money figure scales with the tick value.
 - **There is no equity-curve statistic.** No Sharpe ratio, no volatility figure, no expected
   value per trade in the abstract. Each needs a sampling model for the *untraded* periods, and
   a sampled curve is a claim about the future wearing the costume of a measurement.
@@ -86,13 +115,16 @@ Three further limits, all reported in the output rather than buried here:
 
 ## The sample result, and what it actually says
 
-On the committed fixture: 19 closed trades, 9 winners, 10 losers, +462.00 on 10 000, of which
-45.60 was commission. Max drawdown 78.04, profit factor 3.67.
+On the committed fixture, with the **measured** specification: 19 closed trades, 9 winners,
+10 losers, +38.29 on 10 000, of which 358.92 was commission. Max drawdown 212.70, profit
+factor 1.12, win rate 42.1%.
 
-A 47% win rate with a profit factor of 3.7 is not a validated edge. It is one day of invented
-prices, and it is published here as a demonstration that the command works, not as a result.
-The number to watch is the win rate: below 50%, which is what a stop-and-target system
-trailing its stop to break-even should look like on data it has never seen.
+Before the specification was measured, the same fixture and the same code reported +462.00 and
+a profit factor of 3.67. The tick value was assumed at 1.0 when Alpari's is 0.1, which made
+every figure ten times too large and every position a tenth of the intended risk.
+
+That comparison is the reason to distrust any number in this file. A 1.12 profit factor is
+already close to nothing, and the real-data result above is negative.
 
 ## Reproducibility
 

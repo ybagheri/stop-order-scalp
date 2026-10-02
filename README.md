@@ -10,13 +10,20 @@
 > **Phases 1–7 complete, and it runs.** The domain layer, configuration, logging, the
 > MetaTrader 5 feed, the closed-candle freeze, the M15/M1 baseline decision, the position
 > sizer, the idempotent order manager, the monotonic trailing stop and the write-intent
-> lifecycle, and the backtester are implemented, **wired together**, and tested — **1159
+> lifecycle, and the backtester are implemented, **wired together**, and tested — **1178
 > tests, no broker required**. `run --dry-run` executes the whole pipeline against a
 > simulated venue and prints what it did on every cycle; `backtest --data PATH` replays
 > recorded candles through that same code and reports the distribution of outcomes.
-> Of the seven CLI commands, `validate-config`, `test-connection`, `run`, `journal` and
-> `backtest` work; `status` and `diagnostics` exit **4** and say which phase has not
-> landed.
+>
+> **All seven CLI commands are built**, and the symbol specification is **measured** from a
+> real Alpari MT5 terminal rather than assumed — which mattered more than anything else in
+> the project so far. `diagnostics` reports what it found, including whether the terminal
+> still agrees with the recorded values.
+>
+> **On 30 000 bars of real US30 data the rule loses money**: 9 trades, −219.82 on 10 000,
+> profit factor 0.21, and commission nearly three times the gross profit. That is a real
+> result and it is negative — see [`docs/backtest/README.md`](docs/backtest/README.md).
+> Nothing here is a validated edge.
 >
 > **The rule is configuration, not code.** Direction timeframe, entry offset, stop, target,
 > risk percentage and commission all live in
@@ -124,7 +131,7 @@ Part of the contract, because a supervisor process depends on them.
 ## Development
 
 ```bash
-python -m pytest                             # 1159 tests
+python -m pytest                             # 1178 tests
 python -m ruff check .                       # lint
 python -m mypy                               # types, strict, src + tests
 python scripts/check_architecture.py         # architecture boundaries

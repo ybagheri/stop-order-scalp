@@ -22,11 +22,7 @@ from typing import Any
 
 import pytest
 
-from stop_order_scalp.backtest.replay import (
-    ReplayResult,
-    assumed_specification,
-    replay,
-)
+from stop_order_scalp.backtest.replay import ReplayResult, replay
 from stop_order_scalp.backtest.runner import run_backtest_from_args
 from stop_order_scalp.backtest.statistics import BacktestStatistics, EquityPoint, summarise
 from stop_order_scalp.domain.exceptions import ConfigError
@@ -34,6 +30,7 @@ from stop_order_scalp.domain.models import Candle
 from stop_order_scalp.domain.value_objects import Price
 from stop_order_scalp.infrastructure.config import AppConfig, load_config
 from stop_order_scalp.market_data.candles import aggregate
+from stop_order_scalp.market_data.symbols import MEASURED, us30_specification
 
 
 @pytest.fixture
@@ -547,9 +544,19 @@ class TestDrawdown:
         assert statistics.max_drawdown == 0
 
 
-class TestSpecificationIsAdmitted:
-    def test_the_assumed_specification_is_reported(self, config: AppConfig, csv_file: Path) -> None:
-        """Every money figure scales with the tick value, so the guess travels with the number."""
+class TestSpecificationIsReported:
+    """The specification travels with the numbers, because everything scales with it.
+
+    This began as "the assumed specification is reported" and asserted a note containing the
+    word *assumed*. Phase 11 measured the real values, so the assertion that mattered -- that
+    the specification is *in the report at all* -- is kept and the wording corrected. A test
+    that pinned the word rather than the behaviour would have failed for the right reason and
+    been "fixed" by deleting it.
+    """
+
+    def test_the_specification_is_reported(
+        self, config: AppConfig, csv_file: Path
+    ) -> None:
         import argparse
 
         report = run_backtest_from_args(
@@ -559,8 +566,24 @@ class TestSpecificationIsAdmitted:
         )
         specification = report["specification"]
         assert specification is not None
-        assert specification["tick_value"] == str(assumed_specification("US30").tick_value)
-        assert any("assumed" in note for note in report["notes"])
+        assert specification["tick_value"] == str(us30_specification("US30").tick_value)
+        assert any(
+            "specification" in note.lower() for note in report["notes"]
+        ), "the report does not mention the specification its money figures depend on"
+
+    def test_the_measured_tick_value_is_the_one_that_was_measured(self) -> None:
+        """A permanent guard on the number that decided every P/L figure in this project.
+
+        `tick_value` was hand-written as 1.0 and the terminal says 0.1. Everything the project
+        reported was ten times too large while positions were ten times too small. If this
+        assertion ever has to change, the change is a re-measurement, not an edit.
+        """
+        assert MEASURED.tick_value == Decimal("0.1")
+        assert MEASURED.value_per_point_per_lot == Decimal("0.1"), (
+            "one point on one lot must be 0.1 USD on Alpari US30; a different value here means "
+            "the specification was edited rather than re-measured"
+        )
+        assert MEASURED.volume_min == Decimal("0.01")
 
 
 class TestTheTypeItself:

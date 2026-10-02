@@ -86,8 +86,6 @@ class TestShippedDefaults:
         # baseline is no longer reproducible from this file alone.
         assert not baseline.strategy.filters.any_enabled
 
-    def test_al_brooks_integration_is_disabled_by_default(self, baseline: AppConfig) -> None:
-        assert not baseline.integrations.al_brooks.enabled
 
     def test_default_environment_is_dry_run(self, baseline: AppConfig) -> None:
         assert baseline.environment.environment is Environment.DRY_RUN
@@ -182,9 +180,16 @@ class TestValidation:
         with pytest.raises(ConfigError, match="unknown session"):
             _load(tmp_path)
 
-    def test_geometry_without_enabling_the_integration_is_rejected(self, tmp_path: Path) -> None:
-        _write(tmp_path, "integrations:\n  al_brooks:\n    enabled: false\n    allow_geometry: true\n")
-        with pytest.raises(ConfigError, match="requires"):
+    def test_the_removed_integration_key_is_now_rejected(self, tmp_path: Path) -> None:
+        """A key whose implementation was deleted must be an error, not a silent no-op.
+
+        The Phase 9 revert removed the adapter but left `integrations.al_brooks` accepted by
+        the config loader, so an operator could still write it, see no complaint, and conclude
+        something was configured. The whole point of rejecting unknown keys is that this fails
+        loudly instead.
+        """
+        _write(tmp_path, "integrations:\n  al_brooks:\n    enabled: false\n")
+        with pytest.raises(ConfigError, match="unknown configuration keys"):
             _load(tmp_path)
 
     def test_a_symbol_cannot_be_both_approved_and_quarantined(self, tmp_path: Path) -> None:

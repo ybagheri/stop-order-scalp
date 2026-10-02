@@ -27,6 +27,7 @@ from stop_order_scalp.application.service import (
 from stop_order_scalp.domain.enums import Environment, LifecycleState
 from stop_order_scalp.infrastructure.config import AppConfig, load_config
 from stop_order_scalp.infrastructure.persistence import StateLedger
+from stop_order_scalp.market_data.symbols import MEASURED
 
 
 @pytest.fixture
@@ -118,6 +119,12 @@ def _plant_unresolved(state_file: Path) -> None:
     )
 
 
+def config_percent(service: Any) -> Decimal:
+    """The configured risk percentage, read rather than assumed."""
+    percent: Decimal = service.config.strategy.risk.percent
+    return percent
+
+
 class TestItRuns:
     def test_a_dry_run_returns_ok(self, service: Any) -> None:
         assert service.run(max_cycles=30) > 0
@@ -149,11 +156,46 @@ class TestItRuns:
         assert record.entry < record.take_profit, "a BUY target must sit above entry"
 
     def test_the_order_is_sized_from_the_risk_budget(self, service: Any) -> None:
+        """The size is arithmetic, and this checks the arithmetic rather than memorising it.
+
+        This asserted ``0.4`` lots, and it passed -- for the wrong reason. The tick value was
+        hand-written as ``1.0`` when Alpari's US30 is ``0.1``, so a 100-point stop looked like
+        $100 per lot instead of $10, and the sizer produced a position a tenth of the intended
+        risk. The constant was the bug, not the sizer.
+
+        Phase 11 measured the real specification, the size became 3.12 lots, and the *same*
+        calculation is now written out:
+
+            budget        0.5% of 10,000                = 50.00
+            risk per lot  100 points x 0.1 USD/point   = 10.00
+            commission    6.00 per lot, round trip      =  6.00
+            size          50 / (10 + 6) = 3.125, floored to the 0.01 step = 3.12
+
+        So the assertion states the budget, the per-lot risk and the commission, and requires
+        the total to land just under the budget without exceeding it. A change in the tick
+        value, the stop distance or the commission now moves this test rather than requiring
+        someone to remember to update a magic number.
+        """
         service.run(max_cycles=30)
         record = next(iter(service.broker._orders.values()))
 
-        # 0.5% of a $10,000 balance with a 100-point stop and $6/lot commission.
-        assert record.volume.lots == Decimal("0.4")
+        balance = Decimal("10000")
+        budget = balance * config_percent(service) / Decimal(100)
+        per_point = MEASURED.value_per_point_per_lot
+        stop_points = Decimal("100")
+        risk_per_lot = per_point * stop_points
+        commission_per_lot = Decimal("6.0")
+        cost_per_lot = risk_per_lot + commission_per_lot
+
+        lots = record.volume.lots
+        assert lots == (budget / cost_per_lot).quantize(MEASURED.volume_step), (
+            f"sized at {lots} lots, which is not the risk budget divided by the per-lot cost"
+        )
+        assert lots * cost_per_lot <= budget, "the position risks more than the budget allows"
+        assert (lots + MEASURED.volume_step) * cost_per_lot > budget, (
+            "a step larger would still have fitted, so the position is smaller than the "
+            "budget allows -- risk is not being taken"
+        )
 
     def test_a_full_lifecycle_runs(self, service: Any) -> None:
         """Place, fill, then manage the stop while the position is open.

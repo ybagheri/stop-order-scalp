@@ -32,10 +32,9 @@ from stop_order_scalp.domain.exceptions import ComponentNotAvailableError
 #: ``market_data.mt5_feed``, where it belongs, because a read-only reachability check is a
 #: market-data concern rather than an execution one. It now runs and reports a structured
 #: result, exiting 3 when the terminal is unreachable.
-DEFERRED_COMMANDS: tuple[tuple[str, ...], ...] = (
-    ("status",),
-    ("diagnostics",),
-)
+# Every command in the contract is now built. Kept as an empty tuple rather than deleted, so
+# adding a command to the contract without implementing it stays a visible failure.
+DEFERRED_COMMANDS: tuple[tuple[str, ...], ...] = ()
 
 #: Commands that have been built and now exit 0. Kept beside the deferred list rather than
 #: deleted from the test, so a regression to "not implemented yet" is a visible failure
@@ -47,6 +46,8 @@ DEFERRED_COMMANDS: tuple[tuple[str, ...], ...] = (
 BUILT_COMMANDS: tuple[tuple[str, ...], ...] = (
     ("run", "--dry-run"),
     ("journal",),
+    ("status",),
+    ("diagnostics",),
 )
 
 
@@ -181,6 +182,17 @@ class TestValidateConfig:
 
 
 class TestDeferredCommands:
+    """Every command in the contract is now implemented.
+
+    This class is kept rather than deleted, and the parametrised cases are skipped when the
+    list is empty, so that adding a command to the contract without building it produces a
+    *failing* test instead of an empty parametrisation that pytest quietly reports as a skip.
+    An empty list is a fact about the project; it should be visible, not silent.
+    """
+
+    @pytest.mark.skipif(
+        not DEFERRED_COMMANDS, reason="no command in the contract is unbuilt"
+    )
     @pytest.mark.parametrize("argv", DEFERRED_COMMANDS)
     def test_an_unbuilt_command_exits_unavailable_rather_than_raising(
         self, argv: tuple[str, ...], hermetic_env_file: Path
@@ -190,6 +202,9 @@ class TestDeferredCommands:
         assert "ERROR [4]" in err
         assert "not implemented yet" in err
 
+    @pytest.mark.skipif(
+        not DEFERRED_COMMANDS, reason="no command in the contract is unbuilt"
+    )
     @pytest.mark.parametrize("argv", DEFERRED_COMMANDS)
     def test_no_unbuilt_command_raises_an_import_error(
         self, argv: tuple[str, ...], hermetic_env_file: Path
@@ -200,6 +215,21 @@ class TestDeferredCommands:
         assert "ImportError" not in err
         assert "Traceback" not in err
         assert code == EXIT_UNAVAILABLE
+
+    def test_the_contract_has_no_holes(self) -> None:
+        """Every command in the contract is built, and the set is stated once, here.
+
+        The contract is seven commands. Six are listed in `BUILT_COMMANDS` because they run
+        with no arguments; `backtest` needs `--data`, and is asserted separately below because
+        without it the command correctly refuses with exit 2 rather than running.
+        """
+        assert set(BUILT_COMMANDS) == {
+            ("run", "--dry-run"),
+            ("journal",),
+            ("status",),
+            ("diagnostics",),
+        }
+        assert DEFERRED_COMMANDS == (), "a command in the contract is not built"
 
 
 class TestResolve:

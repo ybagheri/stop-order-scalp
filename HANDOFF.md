@@ -10,10 +10,55 @@
 
 ## Current Phase
 
-**Phase 10 — Backtest and Statistics — COMPLETE and green. `backtest --data PATH` works.**
+**Phase 11 — Demo Validation — in progress. The specification is measured; the account is
+not currently valid.**
 
-Next phase to execute: **Phase 11 — Demo Validation**, which needs a real MetaTrader 5 demo
-account and a human.
+Two facts to read before anything else:
+
+1. **`tick_value` was wrong by a factor of ten for ten phases.** It was hand-written as `1.0`;
+   Alpari's US30 is `0.1`. Every reported P/L figure was ten times too large and every
+   position was a tenth of the intended risk. The specification is now measured, lives in
+   `market_data/symbols.py` in one place with its capture date, and is pinned by a test.
+2. **Demo account 53137121 is no longer valid.** The terminal authorised at 12:16 and has
+   failed with `Invalid account` since 13:37, across a restart. A working account is needed to
+   continue; no code change will fix this one.
+
+### The first real backtest, and it loses money
+
+30 022 real US30 M1 bars, one month: **9 trades, 2 winners, −219.82 on 10 000 (−2.2%), profit
+factor 0.21.** Commission was 166.32 against a gross profit of 57.36 — costs nearly three
+times the gross, at 3 lots with a $6 round trip. That is a structural problem with the size,
+and it holds before you ask whether the entries are any good, so it is the cheap thing to rule
+out first.
+
+**Do not change the rule until the size question is answered.** Changing entries to fix a cost
+problem is how a losing system gets slower instead of fixed.
+
+### What Phase 11 must still do
+
+1. **Get a valid demo account**, put `SOS_MT5_LOGIN` and `SOS_MT5_SERVER` in `.env`, and run
+   `diagnostics`. Confirm `specification_matches_recorded: true`. A CFD's tick value can move
+   with the underlying index, so this is a live check, not a formality.
+2. **No password is needed, and none is stored.** An already-signed-in terminal attaches to
+   its own session; `EnvironmentSettings` has no password field by design, and reading a symbol
+   specification must not require a broker credential on disk.
+3. **Nothing has ever placed an order.** The retcode table was written from documentation, and
+   the whole execution path is exercised only against a simulator.
+
+## What the last three phases cost, and why
+
+| Phase | What it found |
+| --- | --- |
+| 9 | the idempotency guarantee was dead code, and 1116 tests passed |
+| 10 | the venue charged no commission; the clock never moved; closed trades were never recorded |
+| 11 | the tick value was 10x wrong, and the rule loses money on real data |
+
+Every one of them was found by *running* the thing rather than by reading it, and two of the
+three were invisible to a large green suite. The recurring lesson is in
+[Testing rules](#testing-rules-this-project-has-now-learned-twice) below and it has now cost
+three phases: **check a number against a second, independent number.** `total_commission`
+against the config; `net_profit` against the balance change; the reported P/L against the
+specification the terminal actually reports.
 
 ## Read this before Phase 11
 
