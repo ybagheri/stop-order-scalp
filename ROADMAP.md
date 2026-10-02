@@ -738,6 +738,18 @@ That is the most useful thing Phase 11 has produced, and it cost one day of inve
 find out. The open question is whether the loss is the entries (the rule) or the exits (a
 trailing stop that gives back too much) or simply the size the risk budget demands.
 
+### Three demo accounts, locked by a login this project should never have attempted
+
+`MT5Feed.connect` passed `login`/`password`/`server` to `mt5.initialize` unconditionally. With
+no password configured, MetaTrader 5 read that as a **login attempt with an invalid password**
+and answered `(-2, 'Invalid "password" argument')`. Repeated, that is what a broker counts as
+failed logins, and three demo accounts stopped working.
+
+No password was entered; an invalid one was *sent*, and that is the same thing to a broker. A
+login attempt without a password is worse than none at all. Credentials now go out only when a
+password exists, with four tests pinned against the old behaviour — one of which passed against
+the bug until it was rewritten.
+
 ### A second broker, and the same lesson twice
 
 A Markets demo account does not have a `US30`. It has `DowJones30`, quoted to **zero decimals**,

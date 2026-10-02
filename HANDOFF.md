@@ -85,6 +85,51 @@ candle layer, not the strategy, is what has been moving.
    EURUSD deal appears in the terminal log for account 8039744; that was made in the terminal,
    not by this project.)
 
+## Why three demo accounts locked, and what was done about it
+
+**This project caused it, and the mechanism is worth reading so it cannot be repeated.**
+
+Before the Phase 11 fix, `MT5Feed.connect` passed login, password and server to
+`mt5.initialize` unconditionally. With `SOS_MT5_PASSWORD` unset that meant:
+
+    mt5.initialize(path=..., login=53137121, password=None, server="Alpari-MT5-Demo")
+
+MetaTrader 5 does not read that as "attach to the session you already have". It reads it as a
+**login attempt with an invalid password**, and answers `(-2, 'Invalid "password" argument')`.
+Running that repeatedly is exactly what a broker counts as failed logins.
+
+No password was ever *entered* — but an invalid one was *sent*, and the difference is the whole
+bug. **A login attempt without a password is worse than no login attempt at all.**
+
+A second contributor, which cannot be separated from the first from the outside: the terminal
+was killed and restarted once, which triggers its own auto-login using whatever the terminal
+has stored. Whether that contributed is not determinable after the fact.
+
+Fixed in `07c6c66` — credentials go out **only when a password exists to send**, and an empty
+string counts as absent. Pinned by `tests/unit/test_mt5_login_safety.py`, four of whose tests
+were verified to fail against the old code. One of them had to be rewritten first because it
+passed against the bug: it asserted only that a path was present, which is true in both shapes.
+The property worth stating is the combination — the path goes out **and** the credentials do
+not.
+
+The same file also asserts, structurally, that `EnvironmentSettings` has no password field and
+that `MT5Feed` uses `__slots__` with no credential-shaped slot. Both are there so that adding
+one is a failing test rather than a review question.
+
+## Whether to put the password in `.env`
+
+**Recommendation: do not.** It is not needed for anything this project does.
+
+An already-signed-in terminal attaches to its own session, which is how every measurement in
+Phase 11 was taken. Storing a broker credential buys nothing and creates a file whose loss, or
+whose paste into a chat or an issue, is a live-credential leak with a long tail. The project's
+own rule is that reading a symbol specification must not require a broker password on disk.
+
+If an unattended login to a terminal nobody signed into is ever needed, `SOS_MT5_PASSWORD` is
+the supported opt-in, it is read at the moment of use and never stored on an object — and the
+code above will only send it together with a login and a server, so it cannot become a rejected
+login.
+
 ## What the last three phases cost, and why
 
 | Phase | What it found |
