@@ -10,11 +10,13 @@
 > **Phases 1–7 complete, and it runs.** The domain layer, configuration, logging, the
 > MetaTrader 5 feed, the closed-candle freeze, the M15/M1 baseline decision, the position
 > sizer, the idempotent order manager, the monotonic trailing stop and the write-intent
-> lifecycle are implemented, **wired together**, and tested — **1127 tests, no broker
-> required**. `run --dry-run` executes the whole pipeline against a simulated venue and
-> prints what it did on every cycle. Of the seven CLI commands, `validate-config`,
-> `test-connection`, `run` and `journal` work; the rest exit **4** and say which phase has
-> not landed.
+> lifecycle, and the backtester are implemented, **wired together**, and tested — **1159
+> tests, no broker required**. `run --dry-run` executes the whole pipeline against a
+> simulated venue and prints what it did on every cycle; `backtest --data PATH` replays
+> recorded candles through that same code and reports the distribution of outcomes.
+> Of the seven CLI commands, `validate-config`, `test-connection`, `run`, `journal` and
+> `backtest` work; `status` and `diagnostics` exit **4** and say which phase has not
+> landed.
 >
 > **The rule is configuration, not code.** Direction timeframe, entry offset, stop, target,
 > risk percentage and commission all live in
@@ -79,6 +81,17 @@ Read [`docs/operations/RUNNING.md`](docs/operations/RUNNING.md) for how to inter
 output. Repeating the identical command gives the identical result — see
 [Repeating a run](docs/operations/RUNNING.md#repeating-a-run) for why that needed fixing.
 
+To replay recorded candles instead:
+
+```bash
+python -m stop_order_scalp backtest --data tests/fixtures/us30_m1_sample.csv
+```
+
+A synthetic sample file is committed so the command runs with no setup; the file says in its
+own first two lines that it is invented. Read
+[`docs/backtest/README.md`](docs/backtest/README.md) before quoting any number it prints —
+in particular, that the symbol specification is a guess that every money figure scales with.
+
 ## CLI
 
 ```bash
@@ -86,7 +99,7 @@ python -m stop_order_scalp run                # live trading (refuses unless exp
 python -m stop_order_scalp run --dry-run      # full pipeline, zero broker writes
 python -m stop_order_scalp status             # connection, account, symbol, state, risk
 python -m stop_order_scalp validate-config    # validate config/default.yaml + .env
-python -m stop_order_scalp backtest --help    # historical replay
+python -m stop_order_scalp backtest --data PATH   # replay candles, report the distribution
 python -m stop_order_scalp test-connection    # MT5 reachability, read-only
 python -m stop_order_scalp journal            # trade journal
 python -m stop_order_scalp diagnostics        # environment + config bundle
@@ -111,7 +124,7 @@ Part of the contract, because a supervisor process depends on them.
 ## Development
 
 ```bash
-python -m pytest                             # 1116 tests
+python -m pytest                             # 1159 tests
 python -m ruff check .                       # lint
 python -m mypy                               # types, strict, src + tests
 python scripts/check_architecture.py         # architecture boundaries

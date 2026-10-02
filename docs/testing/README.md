@@ -23,6 +23,8 @@ python scripts/check_architecture.py         # architecture boundaries
 
 | File | Tests | Covers |
 | --- | --- | --- |
+| `tests/backtest/test_backtest.py` | 27 | Replay end to end: walk-forward, no look-ahead, statistics from the venue's records, commission charged, the command's refusals, and replaying twice |
+| `tests/application/test_service.py` | 42 | The assembled system run for real, and what a *second* run sees |
 | `tests/unit/test_interfaces.py` | 108 | The protocols; every module imports; every `__all__` entry resolves |
 | `tests/unit/test_mt5.py` | 80 | The MT5 boundary against a fake terminal: lazy import, converters, feed, `ServerClock`, `probe_connection`, the execution surface |
 | `tests/unit/test_config.py` | 55 | Three-layer config, unknown-key rejection, `.env` precedence, secret handling |
@@ -163,3 +165,64 @@ assumption about which end of the table was newest.
 
 **What this cannot prove:** that the real terminal behaves as documented. Only Phase 11,
 against a live terminal, can do that.
+
+## Testing a stateful system: run it twice
+
+The most valuable test in this project asserts nothing about a single run. It runs the system
+twice against the same state file and compares.
+
+It exists because of a specific failure. Phase 9 shipped with the idempotency guarantee dead:
+`build_service` constructed the ledger instead of loading it, so recovery was blind and the
+first write erased every prior record. **1116 tests passed.** Every one of them built a fresh
+`tmp_path` and ran once. The defect was invisible in isolation and obvious in sequence, and
+the suite only ever tested one run.
+
+So the rule this project now holds itself to:
+
+> A test that exercises state must exercise it **twice, against the same file**.
+
+`TestAcrossTwoRuns` (application) and `TestReplayedTwice` (backtest) are that rule made
+permanent. When you add state to a component, add the second run to its test.
+
+## A regression test that cannot fail
+
+Phase 9 also produced the opposite failure: tests written for real bugs that passed against
+those bugs. Four of the first eight, recorded because each is an ordinary mistake:
+
+| How it lied | Why it passed |
+| --- | --- |
+| compared the on-disk ledger to the in-memory one | those two agree even when both are wrong |
+| compared entry *counts* across two runs | run two re-records the same client tag, so the counts match even though the row was replaced |
+| `if not detail.startswith(...): continue` | with the bug present, every detail was skipped, so the loop body never ran |
+| passed a `--config` flag the CLI does not have | the command read a different ledger than the test had populated |
+
+And one in Phase 10: a "duration is real" assertion that passed with the clock fix reverted,
+because it looked at a trade list that was empty in the reverted state.
+
+**So the check is part of writing the test, not a formality afterwards:** revert the fix, run
+the test, confirm it fails, restore. If it passes, the test is a comment with a runtime cost.
+
+## Checking a number against a second number
+
+Phase 10 built the first thing here that reports numbers, and three of them were wrong in the
+direction that flatters a strategy:
+
+- the venue charged **no commission** while the risk engine sized positions net of it, so
+  every P/L figure was too high by exactly the cost already accounted for
+- the venue's **clock never moved**, so every trade duration read as 0 seconds
+- **closed trades were never recorded**, so exits had to be guessed from price action
+
+Each was found by reconciling two independent numbers, not by reading one:
+
+| Reported | Checked against |
+| --- | --- |
+| `total_commission` | `commission_per_lot` in the config |
+| `net_profit` | `ending_balance - starting_balance` |
+| one trade's charge | `rate × lots` under the configured mode |
+| an exit reason | whether the P&L sign agrees with `take_profit` / `stop_loss` |
+
+The same instinct applies to the M15 filter: a replay that reports *zero* trades is a result
+to be explained, not a shrug. On this rule and this data, zero meant the direction filter was
+correctly rejecting a series with no direction — which is a fact about the fixture, and the
+fixture was rebuilt to make it visible.
+

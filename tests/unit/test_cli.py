@@ -35,16 +35,32 @@ from stop_order_scalp.domain.exceptions import ComponentNotAvailableError
 DEFERRED_COMMANDS: tuple[tuple[str, ...], ...] = (
     ("status",),
     ("diagnostics",),
-    ("backtest",),
 )
 
 #: Commands that have been built and now exit 0. Kept beside the deferred list rather than
 #: deleted from the test, so a regression to "not implemented yet" is a visible failure
 #: instead of a silently smaller suite.
+#:
+#: ``backtest`` is here with ``--data`` rather than bare, and that asymmetry is the point: a
+#: replay with no input file has nothing to say, so it exits 2 with a reason instead of
+#: generating candles and reporting a result. Asserted separately below.
 BUILT_COMMANDS: tuple[tuple[str, ...], ...] = (
     ("run", "--dry-run"),
     ("journal",),
 )
+
+
+def test_backtest_without_a_data_file_refuses_with_a_reason(
+    hermetic_env_file: Path,
+) -> None:
+    """The command is built, and it declines to invent its input.
+
+    Exit 2 (a configuration problem) rather than 0 or 4: nothing is missing from the code,
+    something is missing from the invocation.
+    """
+    code, _, err = _run(["backtest", "--env-file", str(hermetic_env_file)])
+    assert code == 2, f"backtest with no --data exited {code}"
+    assert "--data" in err
 
 
 @pytest.mark.parametrize("argv", BUILT_COMMANDS)

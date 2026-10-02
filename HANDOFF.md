@@ -10,124 +10,236 @@
 
 ## Current Phase
 
-**Phase 9 — Make It Run — COMPLETE and green. `run --dry-run` works, repeatably.**
+**Phase 10 — Backtest and Statistics — COMPLETE and green. `backtest --data PATH` works.**
 
-Next phase to execute: **Phase 10 — Backtest and Statistics** (only after a human has looked
-at the dry run's output).
+Next phase to execute: **Phase 11 — Demo Validation**, which needs a real MetaTrader 5 demo
+account and a human.
 
-## Read this before Phase 10
+## Read this before Phase 11
 
-The idempotency guarantee was broken for the whole of Phase 9, and 1116 tests passed while it
-was broken. Both facts matter more than the bugs themselves.
+Phase 10 found three bugs by building a thing that reports numbers. All three were in code
+that had been "done" for phases, and all three made results look **better** than they were.
+That direction is the one to worry about: a bug that loses money gets noticed.
+
+### The venue was not charging commission
+
+`configure_specification` takes a `commission` argument. Neither the dry run nor the replay
+passed it, so `SimulatedBroker` charged nothing. The risk engine sizes the position *net* of
+`commission_per_lot` (6.0 per lot, round trip) — so a free venue books the full gross as
+profit, and every P/L figure in the project overstated the result by exactly the cost the
+sizing had already accounted for.
+
+Found because a backtest printed `total_commission: 0.0` while the config said 6.0. **Check
+this class of thing by reconciling two independent numbers**, not by reading one: the test
+now asserts `net_profit == ending_balance - starting_balance` and that each trade's charge
+equals `rate × lots` under the configured mode.
+
+### The venue's clock never moved
+
+`SimulatedBroker`'s clock defaults to a frozen `2026-01-01` and only advances when something
+calls `set_time`. The replay did not, so every `opened_at` and `closed_at` was that date and
+every trade duration read as **0 seconds**. Nothing crashed; the report looked complete.
+
+The replay calls `set_time(reference)` per bar. Two tests pin it, and the second one only
+exists because the first was too weak — see the vacuous-test note below.
+
+### A closed trade had no record at all
+
+`SimulatedBroker.close()` popped the position and adjusted the balance. The only way to learn
+what had been traded was to diff the open-position list between ticks, which cannot tell a
+stop-out from a take-profit, cannot recover the exit price, and attributes a closure to
+whichever tick noticed it.
+
+Now: `SimulatedBroker.history()` and the frozen `ClosedTrade`, written at the moment of
+closure while the levels that triggered it were still known. **Every statistic in
+`backtest/statistics.py` is computed from that and nothing else** — no plan, no intended exit,
+no inference. If you add a statistic, it reads `ClosedTrade` or it does not go in.
+
+`_exit_reason` classifies at closure time, not afterwards, because by then a trailed stop has
+moved and the original level is gone. It returns `stop_loss`, `take_profit`, or `closed` — and
+never guesses when neither level explains the exit.
+
+## What Phase 11 must preserve
+
+1. **Never resolve an intent by assumption.** An unresolved entry is a question for the broker.
+   Assuming it was not sent is how a duplicate order is created.
+2. **The retcode table has never met a real failure.** Every entry in it was written from
+   documentation. Capture the actual retcodes a demo account produces and correct the table
+   against them; do not add entries from docs alone.
+3. **Replace the assumed specification with the measured one.** Point `0.1`, tick value `1.0`
+   per lot, contract size `1.0` are guesses, and every money figure in a replay scales with
+   the tick value. A backtest that looks profitable on assumed numbers may be a different
+   number entirely on the real contract. Capture it from the terminal and re-run the sample
+   fixture before drawing any conclusion.
+4. **Re-run the sample fixture after the specification changes**, and expect the money figures
+   to move. The trade *count* should not change; if it does, something else is wrong.
+5. **A demo run is a second run over a venue that persists.** That is the shape in which both
+   the Phase 9 and the Phase 10 defects lived. Test the restart path deliberately.
+
+## Testing rules this project has now learned twice
+
+**A test that exercises state must exercise it twice, against the same file.** 1116 tests
+passed while the idempotency guarantee was dead code, because every test built a fresh
+`tmp_path` and ran once. `TestAcrossTwoRuns` and `TestReplayedTwice` exist for this.
+
+**A regression test that cannot fail is worse than no test.** Four of the first eight written
+for Phase 9 passed against the bugs they were written for:
+
+| How it lied | Why it passed |
+| --- | --- |
+| compared the on-disk ledger to the in-memory one | those agree even when both are wrong |
+| compared entry *counts* across two runs | run two re-records the same client tag, so the counts match |
+| `if not detail.startswith(...): continue` | with the bug, every detail was skipped and the loop body never ran |
+| passed a `--config` flag the CLI does not have | the command read a different ledger than the test populated |
+
+And one in Phase 10: a "duration is real" test that passed with the clock fix reverted,
+because the assertion was on a trade list that was empty in the reverted state.
+
+**So: revert the fix, run the test, confirm it fails.** That check is in the handoff rather
+than done once, and it should be repeated for every new regression test. The Phase 9 and
+Phase 10 checks are both re-runnable from the recorded fix/test pairs.
+
+## Layering note for whoever adds to the backtest
+
+`backtest` sits *inside* `application` in `scripts/check_architecture.py`'s layer order, so it
+**cannot import `TradingService`**. The walk-forward loop in `backtest/replay.py` is therefore
+a second implementation over the same collaborators, and the strategy→risk bridge
+(`_size`) is duplicated in two modules.
+
+That is a real cost and it is stated in the code rather than hidden. `load_candles_csv` and
+`aggregate` were moved to `market_data/candles.py` specifically so both layers could reach
+them without crossing the boundary. If a third copy of the bridge appears, extract it into a
+layer both can import instead.
+
+## How Phase 9 shipped a broken guarantee, and how it was found
+
+Kept because the failure mode is more useful than the fix. The idempotency guarantee was dead
+code for the whole of Phase 9, and 1116 tests passed while it was.
 
 **What went wrong.** `build_service` built the ledger with `StateLedger(path)` — the
 constructor — instead of `StateLedger.load(path)`. The constructor takes a path and starts
-empty; it never reads the file. So `recover()` was handed a blank ledger on every run, and
-the first `record` flushed an empty file over every intent already on disk. Phase 7's entire
-restart-recovery path was dead code in the only place that called it.
+empty; it never reads the file. So on every run `recover()` was handed a blank ledger and
+found nothing to verify, and the first `record` flushed an empty file over every intent
+already on disk. Phase 7's entire restart-recovery path was dead code in the only place that
+called it.
 
 **Why the suite missed it.** Every Phase 7 and Phase 9 test built its own ledger in a fresh
-temporary directory and ran once. Nothing in 1116 tests ever had two runs share a file. The
-defect is invisible in isolation and obvious in sequence, and the suite only ever tested one
-run.
+`tmp_path` and ran once. Nothing in 1116 tests ever had two runs share a file, which is the
+only shape in which the defect is visible. It is correct in isolation and wrong in sequence,
+and the suite only ever tested one run.
 
-**The rule that follows.** A test that exercises state must exercise it *twice*, against the
-same file. `TestAcrossTwoRuns` exists for this and is the first thing to extend in Phase 10.
+**Found by** running the same command twice, after the Phase 9 commit was pushed and the demo
+had been shown to work. Not by a test.
 
 ### The ledger's lifetime must match the venue's lifetime
 
-The fix raised a second question the first one hid. A dry run's ledger is now **in memory by
-default**, and that is not a shortcut past durability.
+The fix raised a second question the first one hid: with `load()`, a dry run correctly read
+what the last run wrote, and three identical dry runs gave `placed`, then `already_recorded`.
 
-`SimulatedBroker` is constructed fresh on every run and remembers nothing. A durable ledger
-beside it would claim "this identity reached a venue" about a venue that has never heard of
-it, and `was_sent()` would then answer *yes* for an order the live run never sent — the
-system would refuse to trade, silently. Three identical dry runs in a row also became
-non-repeatable, which is the one property a dry run most needs.
+The answer was not to weaken the duplicate check. `SimulatedBroker` is constructed fresh every
+run and remembers nothing, so a durable ledger beside it is a lie — it claims an identity
+reached a venue that has never heard of it, and `was_sent()` would then answer *yes* for an
+order a live run never sent. The system would refuse to trade, silently. A ledger's value is
+that it and the venue agree on what was sent, so their lifetimes have to match.
 
-So: `DRY_RUN` gets an in-memory ledger, and the environment is otherwise part of the path
-(`state-dry_run.json`, `state-paper.json`, `state.json` for `LIVE`). An **explicitly
-configured** `state.path` is honoured verbatim and *is* persisted, because that is how restart
-recovery gets exercised at all — two runs pointed at one file must share it.
-
-Every rule still applies to an in-memory ledger: record before send, refuse a repeated tag,
-settle once. Only `flush` stops writing.
+- `DRY_RUN` gets an in-memory ledger. Every rule still holds — record before send, refuse a
+  repeated tag, settle once. Only `flush` stops writing.
+- The environment is otherwise part of the path: `state-dry_run.json`, `state-paper.json`, and
+  unsuffixed `state/state.json` for `LIVE`, which a dry run never writes.
+- An **explicitly configured** `state.path` is honoured verbatim and *is* persisted, because
+  that is how restart recovery gets exercised: two runs pointed at one file must share it, and
+  the second must decline to re-send.
 
 ### `journal` could delete the journal
 
-`_cmd_journal` had the same construct-instead-of-load defect, and the context manager flushes
-on exit. So *asking what had happened* replaced the file with an empty one. It now loads, and
+`_cmd_journal` had the same construct-instead-of-load defect, and its context manager flushed
+on exit. So *asking what had happened* replaced the file with an empty one. It loads now, and
 reports which ledger it read — `state/state.json` is the LIVE ledger, so a journal that
 silently showed nothing would read as "no trades" rather than "wrong file".
+
+A later fix in Phase 10: that same context manager was creating a ledger it had just reported
+as absent, because it flushed unconditionally. It now flushes only when something was written.
 
 ### `config/default.yaml` stating the default is still the default
 
 `state.path` is written in the shipped YAML, so "was this configured?" could not be answered
 with `path is not None` — that classified the project's own default as an operator override
-and left every ledger unscoped. It is now compared against `DEFAULT_STATE_RELATIVE`. A test
+and left every ledger unscoped. It is compared against `DEFAULT_STATE_RELATIVE` now. A test
 caught this one: the first version of the fix passed every unit test and did nothing in
 practice.
 
-### Four regression tests that could not fail
+### Two smaller ones
 
-Written after the fixes, then checked by reverting each fix and re-running its test. Three of
-the first four passed against the bugs they were written for:
+- The report synthesised `"hold"` when a step carried no actions, while `_describe` read the
+  same emptiness as `""`. So a line could read `hold` beside `planned 0.4 lots at 40006.3`
+  while the venue held an order at 40005.7. One `_action_of` decides now, and a `hold` names
+  the resting order or the open position.
+- `synthetic_candles`' docstring described a 30/15/30/15 series the code did not build. It
+  builds 40 up / 5 down, and both numbers are load-bearing; the docstring says why now.
 
-* Compared the on-disk ledger to the in-memory one. Those agree even when both are wrong.
-* Compared entry *counts* between two runs. They match, because run two re-records the same
-  client tag and replaces run one's row one-for-one. Only a **distinct sentinel tag** shows
-  the row was dropped.
-* Skipped any detail it did not recognise with `if not ...: continue` — so with the bug
-  present, every detail was skipped and the loop body never ran. A guard that skips the
-  failing case is worse than no assertion.
-* Passed a `--config` flag the CLI does not have, so the command read a different ledger than
-  the test had populated.
+## How Phase 10 found three more, none of them in the backtest
 
-All eight are now verified to fail with their fix reverted. **Re-run that check after writing
-any new regression test** — it is the only thing that distinguishes a test from a comment.
+Phase 10 built the first thing in this project that reports *numbers*, and the numbers were
+wrong in the direction that flatters a strategy. That is the direction to worry about: a bug
+that loses money gets noticed.
 
-### The report, again
+**The venue was not charging commission.** `configure_specification` takes a `commission`
+argument and neither the dry run nor the replay passed it, so the simulated venue charged
+nothing. The risk engine sizes the position *net* of `commission_per_lot`, so a free venue
+books the full gross as profit, and every P/L figure overstated the result by exactly the cost
+the sizing had already accounted for. Found because a backtest printed
+`total_commission: 0.0` while the config said 6.0.
 
-`_action_of` now exists because two places decided what "no action" means: the report
-synthesised `"hold"` while `_describe` read the same emptiness as `""`, so a line could read
-`hold` beside `planned 0.4 lots at 40006.3` while the venue held an order at 40005.7. A
-`hold` now names the resting order or open position.
+**The venue's clock never moved.** `SimulatedBroker` defaults to a frozen 2026-01-01 and only
+advances when something calls `set_time`. The replay did not, so every `opened_at` and
+`closed_at` was that date and every trade duration read as 0 seconds. Nothing crashed; the
+report looked complete.
 
-`synthetic_candles`' docstring also described a 30/15/30/15 series the code did not build. It
-builds 40 up / 5 down, and both numbers are load-bearing — the docstring now says why.
+**A closed trade had no record.** `close()` popped the position and adjusted the balance, so
+the only way to learn what had been traded was to diff the open-position list between ticks —
+which cannot tell a stop-out from a take-profit, cannot recover the exit price, and attributes
+a closure to whichever tick noticed it. `SimulatedBroker.history()` and the frozen
+`ClosedTrade` exist now, written at the moment of closure while the levels that triggered it
+were still known.
+
+**The lesson, which is the same one twice:** check a number against a second, independent
+number. `total_commission` against the config; `net_profit` against
+`ending_balance - starting_balance`; a trade's charge against `rate × lots`. Reading one
+number and believing it is how a plausible wrong answer survives.
 
 ## Phase 8 — Al Brooks Integration: removed
 
-Built, then reverted. The Phase 0 audit found two unrelated projects in sibling directories
-on the development machine and planned an integration with one of them; nobody asked for it.
-A third-party *signal source* is a decision about strategy, not about plumbing. The code, its
-tests and its documentation are gone. The seam it needed survives — the strategy is a façade
-over frozen settings, so another source could be added later without touching anything below.
+Built, then reverted. The Phase 0 audit found two unrelated projects in sibling directories on
+the development machine and planned an integration with one of them; nobody asked for it. A
+third-party *signal source* is a decision about strategy, not about plumbing. The code, its
+tests and its documentation are gone.
 
-## What Phase 10 must preserve
+The seam it needed survives — the strategy is a façade over frozen settings, so another source
+could be added later without touching anything below.
 
-1. **Every send goes through `place_order`'s ordering** — gate, record, re-read, send once,
-   settle. The backtester drives the same `TradeLifecycle` against `SimulatedBroker`; a
-   shortcut around `place_order` reopens the crash window and bypasses the duplicate checks.
-2. **`VERIFYING` must never reach a placement without a broker read.**
-3. **Unresolved *and* unknown intents are both re-observed** — `awaiting_confirmation()`,
-   never `unresolved()` alone.
-4. **The gate is chosen by the venue and `settings` is always passed**; `SimulatedGate`
-   refuses `LIVE`.
-5. **The replay must not gain a forming-bar concept.** `freeze_closed_bars` decides what is
-   closed. A backtest that hand-feeds a bar the strategy would not have seen is a look-ahead
-   bug shaped like a good result.
-6. **A backtest is a second run, so it inherits every bug above.** A replay over a CSV is
-   exactly the shape that hid the construct-instead-of-load defect: one run, one fresh
-   directory, nothing shared. Test the replay **twice against the same state**, and check
-   that a second replay of identical data gives an identical result rather than
-   `already_recorded`.
-7. **Statistics must be computed from the venue's own records**, not from the plans. The
-   report already reads entry, stop and size back from the broker because quoting the plan
-   beside the action is how a reader ends up with two different prices for one order. A
-   profit figure derived from intended levels is that mistake with more decimal places.
-8. **The synthetic series is not evidence.** It exists to prove the wiring. A backtest that
-   reports a number without saying which file it came from will be quoted as a result.
+## What Phase 10 was asked to preserve, and whether it held
+
+The list Phase 9 left behind, checked against what was built. Kept because a rule that was
+written down and then quietly dropped is worse than one that was never written.
+
+1. **Every send goes through `place_order`'s ordering** — held. `backtest/replay.py` drives
+   the same `TradeLifecycle` against the same `SimulatedBroker`; there is no second path.
+2. **`VERIFYING` must never reach a placement without a broker read** — held, untouched.
+3. **Unresolved *and* unknown intents are both re-observed** — held, untouched.
+4. **The gate is chosen by the venue and `settings` is always passed** — held;
+   `SimulatedGate` refuses `LIVE`.
+5. **The replay must not gain a forming-bar concept** — held. The only thing that reaches the
+   strategy is `freeze_closed_bars` against a reference that advances one bar per cycle, and
+   the strongest test of it is that replaying a 100-bar prefix gives the *same* 100 steps as
+   replaying 400 bars.
+6. **A backtest is a second run, so it inherits every bug above** — held, and it is why
+   `TestReplayedTwice` exists.
+7. **Statistics must come from the venue's own records, not the plans** — held, and it forced
+   `SimulatedBroker.history()` into existence, which is the right outcome.
+8. **The synthetic series is not evidence** — held. `backtest` refuses to run without
+   `--data`, and the committed fixture says in its own first two lines that it is invented.
+
+---
 
 ## Phase 9 — Make It Run — COMPLETE
 
@@ -356,6 +468,15 @@ docs/trailing/README.md
 docs/trailing/TRAILING_MODEL.md
 docs/lifecycle/README.md
 docs/lifecycle/LIFECYCLE.md
+docs/backtest/README.md
+docs/operations/RUNNING.md
+src/stop_order_scalp/application/service.py
+src/stop_order_scalp/backtest/replay.py
+src/stop_order_scalp/backtest/statistics.py
+src/stop_order_scalp/backtest/runner.py
+scripts/make_sample_candles.py
+scripts/check_architecture.py
+tests/fixtures/us30_m1_sample.csv
 src/stop_order_scalp/market_data/candles.py
 src/stop_order_scalp/market_data/mt5_module.py
 src/stop_order_scalp/market_data/mt5_feed.py
@@ -514,7 +635,7 @@ tests/conftest.py, tests/unit/*.py            annotations, hermetic .env
 
 ## Tests
 
-1127 passing, 1 skipped.
+1159 passing, 1 skipped.
 
 | File | Tests |
 | --- | --- |
@@ -562,7 +683,7 @@ integration that was removed in Phase 8.
 ## Test Results
 
 ```
-python -m pytest                             1127 passed, 1 skipped
+python -m pytest                             1159 passed, 1 skipped
 python -m ruff check .                       All checks passed!
 python -m mypy                               Success: no issues found in 95 source files
 python scripts/check_architecture.py         architecture OK: 51 modules checked
@@ -662,22 +783,41 @@ with a normal import and delete the now-unnecessary indirection.
 
 ## Remaining Work
 
-Phases 5 through 12, exactly as listed in `ROADMAP.md`. In order:
+In order, as listed in `ROADMAP.md`:
 
 1. Project foundation — **done**
 2. Market data — **done**
 3. Core strategy — **done**
 4. Risk engine — **done**
-5. Order execution
-6. Position management
-7. Lifecycle and recovery
-8. Al Brooks integration -- **removed**, see Current Phase
-9. Make it run -- done
-10. Backtest and statistics
-11. Demo validation
+5. Order execution — **done**
+6. Position management — **done**
+7. Lifecycle and recovery — **done**
+8. Al Brooks integration — **removed**, see above
+9. Make it run — **done**
+10. Backtest and statistics — **done**
+11. Demo validation — **not started**, and it needs a human with a demo account
+
+Two CLI commands are still unbuilt and still exit 4 honestly: `status` and `diagnostics`.
+Neither blocks trading. `diagnostics` in particular would be the natural way to watch a demo
+account, so it is the first thing to add when Phase 11 starts.
 
 ## Known Issues
 
+* **The assumed symbol specification is the largest open item in the project.** Point `0.1`,
+  tick value `1.0` per lot, contract size `1.0`, written by hand in
+  `docs/mt5/SYMBOL_SPECIFICATIONS.md`. **Every money figure the project produces scales with
+  the tick value**, so a replay on these numbers is a different measurement from the same
+  replay on a real US30 contract. `backtest` reports the assumption in its output for exactly
+  this reason. Phase 11 exists to replace it.
+* **A backtest on one CSV is not a result.** The committed fixture is invented, and a real one
+  would still be a single sample chosen by whoever picked it. The project reports trade count,
+  win rate, profit factor, drawdown and exits-by-reason because they are countable from what
+  the venue did — and deliberately reports **no** Sharpe ratio, no volatility and no
+  equity-curve statistic, because each needs a sampling model for the untraded periods and a
+  sampled curve is a claim about the future wearing the costume of a measurement.
+* **Fills are optimistic in one specific way.** A stop order fills at its level, on the bar
+  that crossed it. Real venues fill with slippage and gaps; `--slippage-points` models the
+  first and is adverse-only by design.
 * **Machine facts for this checkout.** Git is on `PATH` at `C:\Program Files\Git`, so no
   prefixing is needed — this differs from the other machine this project lives on, where
   git lives at `%LOCALAPPDATA%\Programs\Git\cmd` and is *not* on `PATH`. Check before
@@ -688,7 +828,9 @@ Phases 5 through 12, exactly as listed in `ROADMAP.md`. In order:
 * **`.env` exists and is git-ignored.** It sets `SOS_MT5_PATH` to the Alpari terminal.
   `SOS_MT5_LOGIN`, `SOS_MT5_PASSWORD` and `SOS_MT5_SERVER` are **blank** — fill them in
   before `test-connection` can report an account.
-* **`MetaTrader5` is not installed here.** It is a broker-supplied package, not on PyPI —
+* **No MetaTrader 5 terminal has ever been connected.** The `metatrader5` package
+  (5.0.6231) is installed, so imports resolve, but nothing has talked to a broker. Every
+  wire value, retcode and broker limit in this project is still unverified. It is a
   get it from your broker, then `pip install -e ".[mt5]"`. See
   [`docs/mt5/SETUP.md`](docs/mt5/SETUP.md) §1. Nothing in the repository imports it at
   module scope, and the whole suite passes without it. `test-connection` currently reports
@@ -805,52 +947,33 @@ code reads the variable.
 
 ## Next Recommended Phase
 
-**Phase 5 — Order Execution.** Start at `ROADMAP.md` §"Phase 5", with
-`docs/risk/RISK_MODEL.md` and `docs/architecture/ARCHITECTURE.md` §8 as the design input.
+**Phase 11 — Demo Validation.** Start at `ROADMAP.md` §"Phase 11", with
+`docs/mt5/SYMBOL_SPECIFICATIONS.md` and `docs/operations/RUNNING.md` as the design input.
 
-This is the first phase that can touch a broker, and it is where decisions 4, 5, 6 and 7
-from the list above stop being documentation and become code. Read those four carefully
-before designing anything.
+This is the first phase that touches a real venue, and it cannot be done without a human
+holding a demo account. It is also the phase that makes the assumed numbers real.
 
-| What Phase 5 needs | Where it is |
+| What Phase 11 needs | Where it is written down |
 | --- | --- |
-| `Broker` protocol (`place_order`, `cancel_order`, `modify_position`) | `domain/interfaces.py` |
-| `OrderKind`, `Side`, `OrderRecord`, `OrderIntent` | `domain/enums.py`, `domain/models.py` |
-| `TradePlan` — the sized, validated thing to send | `domain/models.py` |
-| `RiskAssessment` with its codes | `domain/models.py`, `risk/risk_manager.py` |
-| `ExecutionSettings` (magic number, poll interval, retry) | `infrastructure/config.py` |
-| `OrderSettings` (deviation, filling policy, min_stop_points) | `infrastructure/config.py` |
-| `SymbolSpecification` for stops-level and volume normalisation | `domain/value_objects/price.py` |
-| `MT5Module` / `MT5Api` — reuse them, do not re-import | `market_data/mt5_module.py` |
-| `BrokerError` / `BrokerRejectedError` / `ExecutionUnknownError` / `RetryableError` | `domain/exceptions.py` |
-| `SymbolSpecification.round_entry_price` for the order price | `domain/value_objects/price.py` |
+| the real `US30` specification, replacing the assumed one | `docs/mt5/SYMBOL_SPECIFICATIONS.md` |
+| the retcode table, corrected against actual failures | `docs/execution/EXECUTION.md` |
+| the dry run driven against a demo terminal | `docs/operations/RUNNING.md` |
+| a comparison of that run against `backtest` on the same data | `docs/backtest/README.md` |
 
-Concretely, in order:
+Order matters. **Capture the specification before anything else**, because every money figure
+in a replay scales with the tick value and the contract size. A backtest run on assumed
+numbers is a different measurement from the same replay on real ones, and comparing the two
+is meaningless until they share a specification.
 
-1. **`execution/gates.py`** — `OrderGate` and `CloseGate`, each `enabled=False` by default,
-   with one ordered `refusal()` explaining what is missing. Build this **before** anything
-   that can send, so every later path has to pass through it.
-2. **`execution/order_manager.py`** — build, validate, place. **Re-read broker orders for
-   the magic number immediately before every send** and refuse if a matching pending order
-   already exists. That is the blink-restart protection, and it must be a precondition of
-   the send rather than a check someone remembers to run.
-3. **`execution/mt5_broker.py`** — `Broker` over the native API, reusing `MT5Module`
-   rather than importing `MetaTrader5` again. Translate `BrokerError` subtypes from the
-   terminal's retcode; `ExecutionUnknownError` is the one that matters most and must be
-   raised — never retried — on an indeterminate outcome.
-4. **`execution/simulated_broker.py`** — a full in-memory venue with real bid/ask, fills,
-   stops and commission. This is **not** a test double: it is what `DRY_RUN` and the
-   backtester run on, so it has to be a first-class implementation from the start.
-5. **Retry classification** — bounded exponential backoff with jitter for *safe reads*
-   only, using `RetrySettings`. Assert in a test that a send is never retried.
-6. Tests: duplicate prevention, rejection handling, and an explicit test that an unknown
-   send outcome is re-observed rather than resent.
-7. Gates, then `ROADMAP.md` → `HANDOFF.md` → `CHANGELOG.md` → `README.md` → `README.fa.md`
-   → commit → push.
+**Expect the sample fixture's money figures to change** once the specification is real. The
+trade *count* should not — if it does, something else is wrong.
 
-**Do not** promote `test-connection` or any other command to live capability in this phase.
-`OrderGate`/`CloseGate` and the three-fold `LIVE` interlock are the safety surface, and they
-land with `execution/gates.py` and its tests.
+### Also unbuilt, and honestly optional
+
+`status` and `diagnostics` still exit 4. Neither blocks trading; both would be genuinely
+useful for watching a demo account. They are the cheapest remaining work in the project.
+
+---
 
 ## Important Notes For The Next AI Agent
 

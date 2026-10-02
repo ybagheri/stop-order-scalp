@@ -24,18 +24,24 @@ installed, and skips that comparison cleanly when it is not.
 
 from __future__ import annotations
 
+import csv
 from collections.abc import Iterable, Sequence
 from dataclasses import dataclass
-from datetime import datetime
+from datetime import UTC, datetime
+from decimal import Decimal
+from pathlib import Path
 from typing import Any
 
 from stop_order_scalp.domain.exceptions import MarketDataError
 from stop_order_scalp.domain.models import Candle
+from stop_order_scalp.domain.value_objects import Price
 from stop_order_scalp.market_data.timeframes import canonical_name, is_aligned, period_seconds
 
 __all__ = [
     "FreezeReport",
+    "aggregate",
     "freeze_closed_bars",
+    "load_candles_csv",
     "require_closed_only",
     "select_closed",
 ]
@@ -223,3 +229,131 @@ def _require_aware(moment: datetime) -> None:
         raise MarketDataError(
             f"naive datetime {moment!r}; candle closure must be judged in broker server time"
         )
+
+
+# =============================================================================
+# Series construction
+#
+# Moved here from ``application/service.py``. All of it is pure candle manipulation with
+# no knowledge of trading, and the layering requires the move: ``backtest`` sits inside
+# ``application``, so it may import this module but not the one these used to live in.
+# Leaving them there would have meant either duplicating them or reaching across a layer
+# boundary to avoid a copy.
+# =============================================================================
+
+
+def load_candles_csv(path: Path, *, timeframe: str = "M1", digits: int = 1) -> list[Candle]:
+    """Read ``time,open,high,low,close`` CSV, oldest first.
+
+    ``time`` is epoch seconds, ISO-8601, or ``YYYY-MM-DD HH:MM:SS``. Rows whose bar has not
+    closed by the time implied by the series are *kept* — the freeze decides what is closed,
+    and pre-filtering here would duplicate that rule in a second place.
+
+    **Lines whose first cell starts with ``#`` are comments**, anywhere in the file including
+    before the header. So a data file can state its own provenance: the safest place for "this
+    is synthetic, do not trade on it" is the top of the file itself, because a separate README
+    is one more thing nobody opens and it drifts out of date. Line numbers in errors count
+    every physical line, comments included, so a message points at the line the reader is
+    actually looking at.
+
+    :raises ValueError: with the line number, because a CSV with a bad row in it is
+        otherwise a mystery that shows up much later as a wrong entry price.
+    """
+    seconds = period_seconds(timeframe)
+    rows: list[tuple[datetime, Decimal, Decimal, Decimal, Decimal]] = []
+    header_seen = False
+    with path.open(encoding="utf-8", newline="") as handle:
+        for number, raw in enumerate(csv.reader(handle), start=1):
+            if not raw or not any(cell.strip() for cell in raw):
+                continue
+            if raw[0].lstrip().startswith("#"):
+                continue
+            if not header_seen:
+                header_seen = True
+                if raw[0].strip().lower() in ("time", "datetime", "date"):
+                    # A real header. Everything after it is data.
+                    continue
+                # No header at all: this row is data, and is parsed as such below.
+            rows.append(_parse_row(raw, number))
+    rows.sort(key=lambda row: row[0])
+    del seconds
+    return [
+        Candle(
+            open_time=moment,
+            open=Price(open_, digits),
+            high=Price(high, digits),
+            low=Price(low, digits),
+            close=Price(close, digits),
+            timeframe_seconds=period_seconds(timeframe),
+            timeframe=timeframe,
+            volume=Decimal("1"),
+            tick_volume=1,
+            # Decided by freeze_closed_bars against the clock, never here.
+            is_confirmed=True,
+        )
+        for moment, open_, high, low, close in rows
+    ]
+
+
+def _parse_row(
+    raw: Sequence[str], number: int
+) -> tuple[datetime, Decimal, Decimal, Decimal, Decimal]:
+    if len(raw) < 5:
+        raise ValueError(f"line {number}: expected 5 columns, got {len(raw)}: {raw!r}")
+    try:
+        moment = _parse_time(raw[0].strip())
+        return (
+            moment,
+            Decimal(raw[1]),
+            Decimal(raw[2]),
+            Decimal(raw[3]),
+            Decimal(raw[4]),
+        )
+    except (ValueError, ArithmeticError) as exc:
+        raise ValueError(f"line {number}: {exc}") from exc
+
+
+def _parse_time(text: str) -> datetime:
+    if text.replace(".", "", 1).isdigit():
+        return datetime.fromtimestamp(float(text), tz=UTC)
+    cleaned = text.replace("Z", "+00:00")
+    moment = datetime.fromisoformat(cleaned)
+    if moment.tzinfo is None:
+        # A naive timestamp is machine-local time, which is exactly the bug the project's
+        # clock rule exists to prevent. Reading it as UTC is the safe, stated assumption.
+        return moment.replace(tzinfo=UTC)
+    return moment
+
+
+def aggregate(candles: Sequence[Candle], source: str, target: str) -> list[Candle]:
+    """Build ``target`` candles by grouping ``source`` bars.
+
+    Needed for a dry run with a single M1 CSV: the M15 direction filter refuses a
+    timeframe mismatch rather than trying to interpret M1 bars as M15, so the higher series
+    has to exist. Aggregating here rather than lying to the filter is the point — a filter
+    fed the wrong timeframe and *accepting* it would be a look-ahead-shaped bug.
+    """
+    if not candles:
+        return []
+    ratio = period_seconds(target) // period_seconds(source)
+    if ratio < 1:
+        return []
+    grouped: list[Candle] = []
+    for start in range(0, len(candles) - ratio + 1, ratio):
+        window = candles[start : start + ratio]
+        first = window[0]
+        grouped.append(
+            Candle(
+                open_time=first.open_time,
+                open=first.open,
+                high=max(candle.high for candle in window),
+                low=min(candle.low for candle in window),
+                close=window[-1].close,
+                timeframe_seconds=period_seconds(target),
+                timeframe=target,
+                volume=sum((candle.volume for candle in window), Decimal("0")),
+                tick_volume=sum(candle.tick_volume for candle in window),
+                is_confirmed=True,
+            )
+        )
+    return grouped

@@ -27,7 +27,7 @@ from __future__ import annotations
 
 from collections.abc import Iterator
 from dataclasses import dataclass, replace
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from decimal import Decimal
 from typing import Any
 
@@ -53,7 +53,7 @@ from stop_order_scalp.domain.models import (
 from stop_order_scalp.domain.value_objects import Money, Price, SymbolSpecification, Volume
 from stop_order_scalp.infrastructure.clock import FixedClock
 
-__all__ = ["SimulatedBroker", "SimulatedTick"]
+__all__ = ["ClosedTrade", "SimulatedBroker", "SimulatedTick"]
 
 #: MetaTrader 5 symbol suffixes used to distinguish bid and ask.
 _BID = "bid"
@@ -71,8 +71,94 @@ class SimulatedTick:
         return self.ask if side is Side.SIDE_BUY else self.bid
 
 
+@dataclass(frozen=True, slots=True)
+class ClosedTrade:
+    """One position the venue closed, as the venue recorded it.
+
+    ``reason`` is the venue's classification at the moment of closure, not a guess made
+    afterwards by comparing levels. A backtest that reports "stopped out" for a trade that
+    actually reached its target is worse than one that reports nothing, because it looks like
+    evidence.
+    """
+
+    ticket: int
+    symbol: str
+    side: Side
+    volume: Volume
+    entry: Price
+    exit_price: Price
+    opened_at: datetime
+    closed_at: datetime
+    gross: Money
+    commission: Money
+    net: Money
+    magic_number: int
+    client_tag: str
+    comment: str
+    reason: str
+
+    @property
+    def is_win(self) -> bool:
+        return self.net.amount > 0
+
+    @property
+    def duration(self) -> timedelta:
+        return self.closed_at - self.opened_at
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "ticket": self.ticket,
+            "symbol": self.symbol,
+            "side": str(self.side),
+            "volume": str(self.volume.lots),
+            "entry": str(self.entry),
+            "exit": str(self.exit_price),
+            "opened_at": self.opened_at.isoformat(),
+            "closed_at": self.closed_at.isoformat(),
+            "duration_seconds": int(self.duration.total_seconds()),
+            "gross": str(self.gross.amount),
+            "commission": str(self.commission.amount),
+            "net": str(self.net.amount),
+            "reason": self.reason,
+        }
+
+
+def _exit_reason(position: _Position, exit_price: Price) -> str:
+    """Why the venue closed this position, decided from the levels it held.
+
+    Decided here, at closure, because afterwards the stop has usually been trailed forward and
+    the original level is gone. Three outcomes, and no fourth: if neither protective level is
+    within reach the closure was something else, and it is labelled as such rather than being
+    forced into "stop" or "target".
+    """
+    stop = position.stop_loss
+    target = position.take_profit
+    if stop is None and target is None:
+        return "closed"
+    if stop is not None:
+        if position.side is Side.SIDE_BUY and exit_price.value <= stop.value:
+            return "stop_loss"
+        if position.side is Side.SIDE_SELL and exit_price.value >= stop.value:
+            return "stop_loss"
+    if target is not None:
+        if position.side is Side.SIDE_BUY and exit_price.value >= target.value:
+            return "take_profit"
+        if position.side is Side.SIDE_SELL and exit_price.value <= target.value:
+            return "take_profit"
+    return "closed"
+
+
 @dataclass
 class _Position:
+    """An open position at the venue. Mutable, because a stop is trailed by assignment.
+
+    Not frozen, unlike :class:`ClosedTrade`: :meth:`SimulatedBroker.modify_position` rewrites
+    ``stop_loss`` in place on every trailing step, and freezing this would mean rebuilding the
+    position -- and, worse, would tempt an implementation into recording the trailed level as
+    the one the position was opened with. The immutable record of what happened is
+    :class:`ClosedTrade`, written once at closure.
+    """
+
     ticket: int
     symbol: str
     side: Side
@@ -208,6 +294,8 @@ class SimulatedBroker:
         self.unknown_outcomes = 0
         #: Every intent this venue was ever asked to accept, successful or not.
         self.send_attempts: list[str] = []
+        #: Every position this venue has closed, oldest first. See :meth:`history`.
+        self._history: list[ClosedTrade] = []
 
     # --- connection ------------------------------------------------------
 
@@ -435,7 +523,13 @@ class SimulatedBroker:
         return True
 
     def close(self, ticket: int, *, at: Decimal | None = None) -> Money:
-        """Close a position at the venue's price and return the realised P&L."""
+        """Close a position at the venue's price and return the realised P&L.
+
+        The closure is appended to :meth:`history` before the balance moves. A venue that
+        forgets a closed trade cannot answer "what happened", and a backtest that has to
+        reconstruct that by diffing the open-position list between ticks gets it subtly wrong
+        the moment two positions overlap -- which is exactly the case a trailing stop creates.
+        """
         self._require()
         position = self._positions.pop(ticket, None)
         if position is None:
@@ -453,7 +547,43 @@ class SimulatedBroker:
         net = Money(gross - fee, _CURRENCY)
         self._balance += net.amount
         self._mark_to_market()
+        self._history.append(
+            ClosedTrade(
+                ticket=ticket,
+                symbol=position.symbol,
+                side=position.side,
+                volume=position.volume,
+                entry=position.entry,
+                exit_price=exit_price,
+                opened_at=position.opened_at,
+                closed_at=self.now,
+                gross=Money(gross, _CURRENCY),
+                commission=Money(fee, _CURRENCY),
+                net=net,
+                magic_number=position.magic_number,
+                client_tag=position.client_tag,
+                comment=position.comment,
+                reason=_exit_reason(position, exit_price),
+            )
+        )
         return net
+
+    def history(
+        self, *, magic_number: int | None = None, symbol: str | None = None
+    ) -> tuple[ClosedTrade, ...]:
+        """Every position this venue has closed, oldest first.
+
+        The venue's own record, which is the only one worth reading. Reconstructing closed
+        trades by comparing the open-position list across ticks is the alternative, and it
+        fails quietly: it cannot tell a stop-out from a take-profit, it cannot recover the
+        exit price, and it attributes a closure to whichever tick happened to notice it.
+        """
+        return tuple(
+            trade
+            for trade in self._history
+            if (magic_number is None or trade.magic_number == magic_number)
+            and (symbol is None or trade.symbol == symbol)
+        )
 
     # --- internals -------------------------------------------------------
 

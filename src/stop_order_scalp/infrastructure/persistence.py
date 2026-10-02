@@ -239,11 +239,15 @@ class StateLedger:
     two entries with one tag is the condition :meth:`record` refuses.
     """
 
-    __slots__ = ("_entries", "_path")
+    __slots__ = ("_dirty", "_entries", "_path")
 
     def __init__(self, path: Path, entries: dict[str, LedgerEntry] | None = None) -> None:
         self._path: Path | None = path
         self._entries: dict[str, LedgerEntry] = dict(entries or {})
+        #: Whether anything has been written since this ledger was opened. Only
+        #: :class:`JsonStateLedger` reads it; a plain :class:`StateLedger` flushes on every
+        #: mutation and has no use for it.
+        self._dirty = False
 
     @property
     def path(self) -> Path | None:
@@ -308,6 +312,7 @@ class StateLedger:
                 "Two intents must never share an identity; the tag derivation has regressed."
             )
         self._entries[entry.client_tag] = entry
+        self._dirty = True
         self.flush()
         return entry
 
@@ -333,6 +338,7 @@ class StateLedger:
             )
         updated = entry.with_outcome(outcome, ticket=ticket, reason=reason)
         self._entries[client_tag] = updated
+        self._dirty = True
         self.flush()
         return updated
 
@@ -362,6 +368,7 @@ class StateLedger:
             raise PersistenceError(f"cannot confirm {client_tag!r}: it was never recorded")
         confirmed = entry.confirmed(ticket, reason)
         self._entries[client_tag] = confirmed
+        self._dirty = True
         self.flush()
         return confirmed
 
@@ -373,6 +380,7 @@ class StateLedger:
         """
         if client_tag in self._entries:
             del self._entries[client_tag]
+            self._dirty = True
             self.flush()
 
     # --- durability ------------------------------------------------------
@@ -409,6 +417,7 @@ class StateLedger:
         ledger = cls.__new__(cls)
         ledger._path = None
         ledger._entries = {}
+        ledger._dirty = False
         return ledger
 
     @property
@@ -479,16 +488,25 @@ class JsonStateLedger(StateLedger):
     string, so renaming the class under it would have been a silent break; a subclass keeps the
     name meaningful while staying a single implementation.
 
-    Adds a context manager, which is how the ``journal`` command wants to use it: a context
-    manager that flushes on exit is a reminder that durability is a property of the write, not
-    of a later flush someone might forget.
+    Adds a context manager, which is how the ``journal`` command wants to use it. The manager
+    flushes **only if something was written** -- see :meth:`__exit__` for why that is not the
+    same as always flushing.
     """
 
     def __enter__(self) -> JsonStateLedger:
+        self._dirty = False
         return self
 
     def __exit__(self, *_: object) -> None:
-        self.flush()
+        # Flush only when this ledger was actually modified. Every mutating method already
+        # flushes as it goes -- durability is a property of the write, not of a later flush
+        # someone might forget -- so an unconditional flush here bought nothing and cost a
+        # file: `journal` is a *reader*, and opening a context manager around it created the
+        # ledger it had just reported as absent. A read that brings a file into existence is
+        # how a "no trades yet" state becomes indistinguishable from a real one.
+        if self._dirty:
+            self.flush()
+            self._dirty = False
 
     @classmethod
     def open(cls, path: Path) -> JsonStateLedger:

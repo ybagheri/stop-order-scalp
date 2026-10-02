@@ -167,6 +167,12 @@ def build_parser() -> argparse.ArgumentParser:
     backtest.add_argument("--to", dest="end", default=None, help="ISO-8601 end timestamp")
     backtest.add_argument("--slippage-points", type=float, default=0.0, help="adverse fill slippage, in points")
     backtest.add_argument("--output", type=Path, default=None, metavar="PATH", help="write the report to a file")
+    backtest.add_argument(
+        "--max-cycles",
+        type=int,
+        default=None,
+        help="stop after this many bars; defaults to replaying the whole file",
+    )
 
     return parser
 
@@ -334,10 +340,10 @@ def _cmd_diagnostics(args: argparse.Namespace, config: AppConfig, out: TextIO, e
 def _cmd_backtest(args: argparse.Namespace, config: AppConfig, out: TextIO, err: TextIO) -> int:
     run_backtest_from_args = _resolve("stop_order_scalp.backtest.runner", "run_backtest_from_args")
 
+    # The runner writes --output itself, and it knows the path it wrote to. This handler used
+    # to write it a second time from here, which meant the file was produced twice from two
+    # places that could disagree about what it contains.
     report = run_backtest_from_args(args, config)
-    if args.output is not None:
-        args.output.parent.mkdir(parents=True, exist_ok=True)
-        args.output.write_text(json.dumps(report, indent=2, default=str), encoding="utf-8")
     _emit(out, report)
     return EXIT_OK
 

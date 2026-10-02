@@ -387,7 +387,8 @@ environment explicit rather than optional. Not a defect in any current call path
 
 ### Not verified
 
-`MetaTrader5` is not installed on the development machine, so the wire values, the retcode
+The `metatrader5` package is installed but no terminal has been connected, so the wire
+values, the retcode
 table and the tag encoding have never met a real terminal. `test-connection` correctly exits 3
 with `package_installed: false`. No live order has been placed.
 
@@ -451,7 +452,7 @@ disappearance. Tracked in `HANDOFF.md`.
 
 ### Not verified
 
-`MetaTrader5` is not installed on the development machine, so the `stops_level` and
+No terminal has been connected, so the `stops_level` and
 `freeze_level` semantics encode documented broker behaviour that has never been observed. A
 broker that behaves differently would show up as refusals where a modification was expected —
 the safe direction to fail, but unproven.
@@ -608,29 +609,78 @@ could not start.
 
 ---
 
-## Phase 10 — Backtest and Statistics — `pending`
+## Phase 10 — Backtest and Statistics — `complete`
 
-Only after the dry run works. Replay historical candles through the *same* lifecycle, against
-`SimulatedBroker`, and report the distribution rather than a single number: profit factor,
-maximum drawdown, trade count, and the result of **not** trading.
+Replay recorded candles through the *same* trading stack and report the distribution rather
+than a single number.
 
-The last one is deliberate. A scalping system whose edge is a handful of points will look
-remarkable on one sample and ordinary on another, and the only way to know which is to count
-the trades it declined.
+Built as `backtest/replay.py`, `backtest/statistics.py` and `backtest/runner.py`, plus
+`backtest --data PATH`. On the committed sample: 19 closed trades, 9 winners, 10 losers,
++462.00 on 10 000, of which 45.60 was commission.
 
-Implement:
+### Two things it refused to do
 
-* `backtest/data.py` — historical candle loading
-* `backtest/engine.py` — replay through `TradeLifecycle` and `SimulatedBroker`
-* `backtest/statistics.py` — the distribution above, plus a no-trade baseline
+**Generate candles.** `backtest` with no `--data` exits 2 and says so. A command that invents
+a price series and prints a profit figure produces a number with no provenance, which is the
+one artefact this project exists not to create. `run --dry-run` with no `--candles` is the
+command that proves the wiring; it says on its face that it is not evidence.
+
+**Report an equity-curve statistic.** No Sharpe ratio, no volatility, no "expected value per
+trade" in the abstract. Each needs a sampling model for the *untraded* periods, and a sampled
+curve is a claim about the future wearing the costume of a measurement. What is reported —
+trade count, win rate, profit factor, drawdown, exits by reason, and the number of trades still
+open at the end — is all countable from what the venue actually did.
+
+`win_rate` and `profit_factor` are `null` rather than `0` when undefined. "No trades" and
+"every trade lost" are different facts.
+
+### Three bugs the replay found, none of them in the replay
+
+**The venue was not charging commission.** `configure_specification` takes a `commission`
+argument and neither the dry run nor the replay passed it, so the simulated venue charged
+nothing. The risk engine sizes the position *net* of `commission_per_lot`; a free venue then
+books the full gross as profit. Every P/L figure in the project overstated the result by
+exactly the cost the sizing had already accounted for — in the direction that flatters the
+strategy. Found because a backtest reported `total_commission: 0.0` while the config said 6.0.
+
+**The venue's clock never moved.** `SimulatedBroker` defaults to a frozen 2026-01-01 and only
+advances when something calls `set_time`. The replay did not, so every `opened_at` and
+`closed_at` was that date and every trade duration read as 0 seconds. The report looked
+complete. `set_time` is called per bar now, and two tests pin it.
+
+**A closed trade had no record.** `close()` popped the position and adjusted the balance, so
+the only way to learn what had been traded was to diff the open-position list between ticks —
+which cannot tell a stop-out from a take-profit, cannot recover the exit price, and
+misattributes a closure to whichever tick noticed it. `SimulatedBroker.history()` and the
+immutable `ClosedTrade` now exist, written at the moment of closure while the levels that
+triggered it were still known. Every statistic is computed from that and nothing else.
+
+### One structural constraint worth knowing
+
+`backtest` sits *inside* `application` in the layer order, so it cannot import
+`TradingService`. The walk-forward loop is written again over the same collaborators rather
+than reaching across the boundary, and `load_candles_csv` / `aggregate` moved from
+`application/service.py` to `market_data/candles.py` so both layers can reach them. The
+strategy→risk bridge is therefore duplicated in two places — which is a weaker guarantee than
+sharing it, and is called out in the code rather than hidden.
+
+### A fixture, and why its numbers look like that
+
+`tests/fixtures/us30_m1_sample.csv` is committed, with `scripts/make_sample_candles.py` and a
+fixed seed beside it, and the file's first two lines say it is synthetic. The regime length
+was tuned, and the tuning is recorded in the script: a per-bar random walk produces **zero**
+trades (the M15 filter correctly rejects a series with no direction), which teaches a reader
+nothing about whether the command works. Forty-five-bar regimes give 19 trades with a win rate
+*below* 50% — credible rather than flattering, and it exercises both the trailing stop and the
+take profit.
 
 ---
 
 ## Phase 11 — Demo Validation — `pending`
 
-A real MetaTrader 5 **demo** account. `MetaTrader5` is not installed on the development
-machine, so every wire value, retcode and specification this project uses is still unverified
-against reality — the classification table and the broker-limit semantics in particular.
+A real MetaTrader 5 **demo** account. The `metatrader5` package (5.0.6231) is now installed
+on the development machine, but no terminal has been connected, so every wire value, retcode
+and specification this project uses is still unverified against reality — the classification table and the broker-limit semantics in particular.
 
 Implement:
 

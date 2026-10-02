@@ -32,12 +32,10 @@ money.
 
 from __future__ import annotations
 
-import csv
 from collections.abc import Sequence
 from dataclasses import dataclass, field
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal
-from pathlib import Path
 from typing import Any
 
 from stop_order_scalp.domain.enums import Environment
@@ -54,7 +52,11 @@ from stop_order_scalp.execution.simulated_broker import (
 from stop_order_scalp.infrastructure.config import AppConfig
 from stop_order_scalp.infrastructure.persistence import StateLedger
 from stop_order_scalp.lifecycle.trade_lifecycle import TradeLifecycle
-from stop_order_scalp.market_data.candles import freeze_closed_bars
+from stop_order_scalp.market_data.candles import (
+    aggregate,
+    freeze_closed_bars,
+    load_candles_csv,
+)
 from stop_order_scalp.market_data.timeframes import period_seconds
 from stop_order_scalp.risk.risk_manager import RiskManager, RiskRequest
 from stop_order_scalp.strategy.strategy import StopOrderStrategy, StrategyContext
@@ -355,7 +357,16 @@ def build_service(
 
     symbol = config.strategy.symbol
     specification = assumed_specification(symbol)
-    configure_specification(specification)
+    # The venue must charge the commission the configuration states, or the two halves of the
+    # system disagree about the cost of a trade: the risk engine sizes the position *net* of
+    # `commission_per_lot`, and a venue charging nothing books the full gross as profit. Every
+    # P/L figure in a dry run then overstates the result by exactly the commission the sizing
+    # already accounted for. Silent, and it flatters the strategy.
+    configure_specification(
+        specification,
+        commission=config.strategy.risk.commission_per_lot,
+        commission_mode=config.strategy.risk.commission_mode,
+    )
 
     settings = EnvironmentSettings(
         environment=Environment.DRY_RUN, allow_live=False, allow_order=False
@@ -555,78 +566,6 @@ class _FixedStepClock:
 # =============================================================================
 
 
-def load_candles_csv(path: Path, *, timeframe: str = "M1", digits: int = 1) -> list[Candle]:
-    """Read ``time,open,high,low,close`` CSV, oldest first.
-
-    ``time`` is epoch seconds, ISO-8601, or ``YYYY-MM-DD HH:MM:SS``. Rows whose bar has not
-    closed by the time implied by the series are *kept* — the freeze decides what is closed,
-    and pre-filtering here would duplicate that rule in a second place.
-
-    :raises ValueError: with the line number, because a CSV with a bad row in it is
-        otherwise a mystery that shows up much later as a wrong entry price.
-    """
-    seconds = period_seconds(timeframe)
-    rows: list[tuple[datetime, Decimal, Decimal, Decimal, Decimal]] = []
-    with path.open(encoding="utf-8", newline="") as handle:
-        reader = csv.reader(handle)
-        header = next(reader, None)
-        if header and header[0].strip().lower() not in ("time", "datetime", "date"):
-            # A header row that is not a header: treat it as data and let the parse fail loudly.
-            rows.append(_parse_row(header, 1))
-        for number, raw in enumerate(reader, start=2):
-            if not raw or not any(cell.strip() for cell in raw):
-                continue
-            rows.append(_parse_row(raw, number))
-    rows.sort(key=lambda row: row[0])
-    del seconds
-    return [
-        Candle(
-            open_time=moment,
-            open=Price(open_, digits),
-            high=Price(high, digits),
-            low=Price(low, digits),
-            close=Price(close, digits),
-            timeframe_seconds=period_seconds(timeframe),
-            timeframe=timeframe,
-            volume=Decimal("1"),
-            tick_volume=1,
-            # Decided by freeze_closed_bars against the clock, never here.
-            is_confirmed=True,
-        )
-        for moment, open_, high, low, close in rows
-    ]
-
-
-def _parse_row(
-    raw: Sequence[str], number: int
-) -> tuple[datetime, Decimal, Decimal, Decimal, Decimal]:
-    if len(raw) < 5:
-        raise ValueError(f"line {number}: expected 5 columns, got {len(raw)}: {raw!r}")
-    try:
-        moment = _parse_time(raw[0].strip())
-        return (
-            moment,
-            Decimal(raw[1]),
-            Decimal(raw[2]),
-            Decimal(raw[3]),
-            Decimal(raw[4]),
-        )
-    except (ValueError, ArithmeticError) as exc:
-        raise ValueError(f"line {number}: {exc}") from exc
-
-
-def _parse_time(text: str) -> datetime:
-    if text.replace(".", "", 1).isdigit():
-        return datetime.fromtimestamp(float(text), tz=UTC)
-    cleaned = text.replace("Z", "+00:00")
-    moment = datetime.fromisoformat(cleaned)
-    if moment.tzinfo is None:
-        # A naive timestamp is machine-local time, which is exactly the bug the project's
-        # clock rule exists to prevent. Reading it as UTC is the safe, stated assumption.
-        return moment.replace(tzinfo=UTC)
-    return moment
-
-
 def synthetic_candles(
     count: int = 90,
     *,
@@ -694,35 +633,3 @@ def synthetic_candles(
     return candles
 
 
-def aggregate(candles: Sequence[Candle], source: str, target: str) -> list[Candle]:
-    """Build ``target`` candles by grouping ``source`` bars.
-
-    Needed for a dry run with a single M1 CSV: the M15 direction filter refuses a
-    timeframe mismatch rather than trying to interpret M1 bars as M15, so the higher series
-    has to exist. Aggregating here rather than lying to the filter is the point — a filter
-    fed the wrong timeframe and *accepting* it would be a look-ahead-shaped bug.
-    """
-    if not candles:
-        return []
-    ratio = period_seconds(target) // period_seconds(source)
-    if ratio < 1:
-        return []
-    grouped: list[Candle] = []
-    for start in range(0, len(candles) - ratio + 1, ratio):
-        window = candles[start : start + ratio]
-        first = window[0]
-        grouped.append(
-            Candle(
-                open_time=first.open_time,
-                open=first.open,
-                high=max(candle.high for candle in window),
-                low=min(candle.low for candle in window),
-                close=window[-1].close,
-                timeframe_seconds=period_seconds(target),
-                timeframe=target,
-                volume=sum((candle.volume for candle in window), Decimal("0")),
-                tick_volume=sum(candle.tick_volume for candle in window),
-                is_confirmed=True,
-            )
-        )
-    return grouped
