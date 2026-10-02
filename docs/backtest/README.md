@@ -64,25 +64,18 @@ no exit level is read from an intent. That is not fastidiousness: the dry-run re
 printed `planned 0.4 lots at 40006.3` beside a stop that had moved to 40011.7, and a statistic
 computed from intended exits is that same bug with more decimal places.
 
-## On real data, the rule loses money
+## On real data
 
 30 022 real US30 M1 bars — one month, exported read-only from Alpari MT5:
 
 ```
-trades  9 closed · 2 winners · 7 losers · win rate 22.2%
-net     -219.82 on 10,000   (-2.2%)
-profit  factor 0.21
-commission  166.32   against a gross profit of 57.36
-drawdown  298.97
-exits    all nine via the trailing stop
+trades  29 closed · 14 winners · 15 losers · win rate 48.3%
+net     +1600.82 on 10,000   (+16.0%)
+profit  factor 3.86
+commission  561.42
+drawdown  271.86
+exits    28 trailing stops, 1 take profit
 ```
-
-**This is a real, negative result.** The rule as configured does not work on real US30 data.
-
-The commission is the loudest signal in it: at 3 lots with a $6 round trip, costs are nearly
-three times the gross profit. That is a structural problem with trading this size this often,
-and it holds *before* you ask whether the entries are any good. So the cheap question to rule
-out first is the size, not the strategy.
 
 Run it yourself:
 
@@ -92,6 +85,29 @@ python -m stop_order_scalp backtest --data path/to/real_us30_m1.csv
 
 A month of M1 bars takes about five seconds.
 
+### This number has already been wrong once, in both directions
+
+The first run on this data reported **−219.82, a profit factor of 0.21, and nine trades**. That
+was not the strategy. `aggregate()` was grouping M1 bars *by position* — every 15th bar — and
+the Alpari export starts at 11:42, not 11:45, and closes for the weekend and for an hour every
+day. So 1 822 of the 2 001 "M15" candles were not on a 15-minute boundary at all, and 49 of
+them were single candles spanning a session break — one opening Friday 23:57 and closing
+Saturday 01:13, with its high and low taken across two days of price action.
+
+The direction filter was reading candles that never existed, and the backtest reported a
+confident number about them. Aggregation is now grouped by timestamp, and all 2 009 produced
+candles land on a 15-minute boundary and coincide exactly with the terminal's own M15 bars.
+
+**Treat that +16% accordingly.** One month, one instrument, one sample chosen by whoever picked
+it. And the venue is still optimistic in a way that inflates it: the replay publishes only each
+candle's **close**, so protective levels are evaluated at closes only and never see an intrabar
+high or low. A bar whose low went through the trailing stop is not treated as stopped out if
+the close is above it, and a bar whose high crossed the take profit is not taken.
+
+Two results in opposite directions from the same code and the same data is the strongest
+possible argument for re-running this after every change to the candle layer.
+
+
 ## What this does not tell you
 
 **A replay measures this rule on this file.** It does not measure the rule. One CSV is one
@@ -100,8 +116,9 @@ as a result by anyone who does not read this page.
 
 Three further limits, all reported in the output rather than buried here:
 
-- **The symbol specification is a broker value, not a fact.** It was measured from Alpari MT5
-  on 2026-10-02 and lives in `market_data/symbols.py` with its source attached. A different
+- **The symbol specification is a broker value, not a fact.** Measured from Alpari MT5 on
+  2026-10-02, and it lives in `market_data/symbols.py` with its source attached. It was
+  wrong by a factor of ten before it was measured — see the history in that module. A different
   broker would differ, and a CFD's tick value can move with the underlying index — so
   `diagnostics` re-reads the live values on every run and warns when they disagree with the
   recorded ones. Every money figure scales with the tick value.

@@ -46,6 +46,18 @@ def make_intent(plan: TradePlan, **changes: object) -> OrderIntent:
     )
 
 
+def _last_commission_charge(broker: SimulatedBroker) -> Decimal:
+    """The commission the venue recorded on its most recent closed trade.
+
+    Read from the venue's own history rather than recomputed, so the assertion is a comparison
+    between two things the program did -- a price conversion and a recorded charge -- and not
+    between the code and a copy of itself.
+    """
+    trades = broker.history()
+    assert trades, "no trade was closed, so there is no commission to read"
+    return trades[-1].commission.amount
+
+
 def fill_through(broker: SimulatedBroker, plan: TradePlan, price: str = "40010.0") -> None:
     """Rest the order and drive price through it, leaving an open position.
 
@@ -231,16 +243,42 @@ class TestMoney:
     def test_floating_profit_is_gross_and_excludes_commission(
         self, broker: SimulatedBroker, plan: TradePlan, us30: SymbolSpecification
     ) -> None:
-        """Matches what a live terminal shows, and avoids charging commission twice."""
+        """Matches what a live terminal shows, and avoids charging commission twice.
+
+        The expected value used to be written as ``delta * contract_size``, which is the
+        formula the venue used to apply -- so the test restated the implementation rather than
+        checking it, and would have passed for any conversion of the wrong magnitude. It now
+        states the conversion the specification defines:
+
+            value = delta / tick_size x tick_value x contract_size
+
+        and, on this instrument, is cross-checked against the realised P/L of the same move so
+        the two cannot drift apart again. The unit trap is worth naming: ``delta`` is a price
+        difference, and a *point* difference is that divided by ``point``. The two differ by ten
+        here, and confusing them looks exactly like a P&L bug.
+        """
         fill_through(broker, plan)
 
         broker.publish("US30", Decimal("40015.0"), Decimal("40015.5"), digits=1)
-        floating = broker.positions()[0].profit.amount
+        position = broker.positions()[0]
+        floating = position.profit.amount
 
+        delta = Decimal("40015.0") - plan.entry.value
         expected = (
-            (Decimal("40015.0") - plan.entry.value) * us30.contract_size * plan.volume.lots
+            delta / us30.tick_size * us30.tick_value * us30.contract_size * plan.volume.lots
         )
         assert floating == expected
+
+        # And the same move, realised, must equal it. The commission is read back from the
+        # venue's own record of the closure, not recomputed here: a test that restates the
+        # formula it is checking agrees with whatever the code does.
+        realised = broker.close(position.ticket, at=Decimal("40015.0")).amount
+        charge = _last_commission_charge(broker)
+        assert charge > 0, "the venue charged no commission at all"
+        assert realised == expected - charge, (
+            "floating and realised P/L disagree for the same price move, so the venue prices a "
+            "position two different ways"
+        )
 
     def test_equity_includes_open_positions(
         self, broker: SimulatedBroker, plan: TradePlan

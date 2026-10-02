@@ -195,16 +195,23 @@ class _Position:
         Gross, not net: commission is charged when the position is *closed*, so adding it
         here would deduct it twice. A broker's floating P/L is gross too, which is what
         keeps this comparable with the live account screen.
+
+        Converted with the **same** tick arithmetic as :meth:`SimulatedBroker.close`, because a
+        position whose floating P/L is computed one way and whose realised P/L is computed
+        another will show a jump at the moment of closure, and a jump that big is always a bug
+        wearing a plausible number. This used to be ``delta * contract_size``, which ignores
+        ``tick_value`` and ``tick_size`` entirely -- correct on Alpari US30 only because
+        ``tick_size == point == 0.1`` makes the two conversions coincide, and wrong on any
+        instrument where they do not.
         """
         if tick is None:
             return Money.of(0, _CURRENCY)
         spec = _SPECS.get(self.symbol)
-        size = spec.contract_size if spec else Decimal("1")
         exit_price = tick.price_for(self.side.opposite)
         delta = exit_price.value - self.entry.value
         if self.side is Side.SIDE_SELL:
             delta = -delta
-        return Money.of(delta * size * self.volume.lots, _CURRENCY)
+        return Money.of(_value_of_move(spec, delta) * self.volume.lots, _CURRENCY)
 
     def protective_hit(self, tick: SimulatedTick) -> bool:
         """Whether a protective level would have triggered at this price."""
@@ -541,8 +548,10 @@ class SimulatedBroker:
             else position.entry
         )
         spec = _SPECS.get(position.symbol)
-        ticks = (exit_price.value - position.entry.value) / (spec.tick_size if spec else Decimal("0.01"))
-        gross = (ticks if position.side is Side.SIDE_BUY else -ticks) * _TICK_VALUE * position.volume.lots
+        delta = exit_price.value - position.entry.value
+        if position.side is Side.SIDE_SELL:
+            delta = -delta
+        gross = _value_of_move(spec, delta) * position.volume.lots
         fee = _commission(position.volume)
         net = Money(gross - fee, _CURRENCY)
         self._balance += net.amount
@@ -703,6 +712,30 @@ class SimulatedBroker:
             f"SimulatedBroker({self._settings.environment}, connected={self._connected}, "
             f"orders={len(self._orders)}, positions={len(self._positions)})"
         )
+
+
+def _value_of_move(spec: SymbolSpecification | None, delta: Decimal) -> Decimal:
+    """What a price move of ``delta`` is worth, per lot.
+
+    The one place this venue converts price to money, used by **both** the floating profit and
+    the realised P/L. One conversion, deliberately: when two code paths price a position and
+    disagree, the account shows a jump at the moment of closure, and a jump that size is always
+    a bug wearing a plausible number.
+
+        value = delta / tick_size  x  tick_value  x  contract_size
+
+    A ``tick_value`` is what one *tick* is worth, and a tick is ``tick_size`` of price, so
+    dividing by ``tick_size`` and multiplying by ``tick_value`` converts price to money
+    directly. Multiplying by ``delta * contract_size`` instead -- which is what the floating
+    profit used to do -- ignores ``tick_value`` completely, and happens to agree on Alpari US30
+    only because ``tick_size == tick_value == 0.1`` there.
+
+    Returns a Decimal; the caller applies the volume.
+    """
+    if spec is None:
+        return delta
+    ticks = delta / spec.tick_size if spec.tick_size else delta
+    return ticks * spec.tick_value * spec.contract_size
 
 
 def _commission(volume: Volume) -> Decimal:

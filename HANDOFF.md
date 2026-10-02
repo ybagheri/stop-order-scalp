@@ -23,16 +23,25 @@ Two facts to read before anything else:
    failed with `Invalid account` since 13:37, across a restart. A working account is needed to
    continue; no code change will fix this one.
 
-### The first real backtest, and it loses money
+### The first real backtest: +16%, and the number has been wrong in both directions
 
-30 022 real US30 M1 bars, one month: **9 trades, 2 winners, −219.82 on 10 000 (−2.2%), profit
-factor 0.21.** Commission was 166.32 against a gross profit of 57.36 — costs nearly three
-times the gross, at 3 lots with a $6 round trip. That is a structural problem with the size,
-and it holds before you ask whether the entries are any good, so it is the cheap thing to rule
-out first.
+30 022 real US30 M1 bars, one month: **29 trades, 14 winners, +1600.82 on 10 000 (+16.0%), profit
+factor 3.86.** Twenty-eight exits via the trailing stop, one take profit.
 
-**Do not change the rule until the size question is answered.** Changing entries to fix a cost
-problem is how a losing system gets slower instead of fixed.
+**The first run on the same data reported −219.82 and 9 trades.** That was not the strategy — it
+was `aggregate()` grouping M1 bars by position instead of by timestamp. Alpari's export starts
+at 11:42 and has weekend and daily-session gaps, so 1 822 of 2 001 "M15" candles were not on a
+15-minute boundary and 49 spanned a session break. The direction filter had been reading
+candles that never existed. Fixed, verified against the terminal's own M15 bars, all 2 009 now
+agree exactly.
+
+**Do not treat +16% as a result.** One month, one sample, and the venue is still optimistic: the
+replay publishes only each candle's close, so protective levels never see an intrabar high or
+low. A bar whose low went through the trailing stop is not stopped out when the close is above
+it. That inflates the number, and how much is unmeasured.
+
+**Do not change the rule yet.** Two results in opposite directions from the same code means the
+candle layer, not the strategy, is what has been moving.
 
 ### What Phase 11 must still do
 

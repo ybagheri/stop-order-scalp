@@ -326,30 +326,59 @@ def _parse_time(text: str) -> datetime:
 
 
 def aggregate(candles: Sequence[Candle], source: str, target: str) -> list[Candle]:
-    """Build ``target`` candles by grouping ``source`` bars.
+    """Build ``target`` candles by grouping ``source`` bars into the windows they belong to.
 
     Needed for a dry run with a single M1 CSV: the M15 direction filter refuses a
     timeframe mismatch rather than trying to interpret M1 bars as M15, so the higher series
-    has to exist. Aggregating here rather than lying to the filter is the point — a filter
+    has to exist. Aggregating here rather than lying to the filter is the point - a filter
     fed the wrong timeframe and *accepting* it would be a look-ahead-shaped bug.
+
+    **Grouped by timestamp, not by position.** This used to take every 15th bar and call it
+    an M15 candle, which is only right if the series starts exactly on a 15-minute boundary
+    and has no gaps. Real data satisfies neither: the Alpari US30 export begins at
+    2026-09-02 11:42 and closes for the weekend and for an hour every day, so position-based
+    grouping produced 1 822 of 2 001 candles that were **not on a 15-minute boundary at all**,
+    and 49 of them straddled a session break -- one "candle" whose open was Friday 23:57 and
+    whose close was Saturday 01:13.
+
+    The direction filter then read a series of candles that never existed, with high and low
+    taken across a gap. Nothing crashed. The strategy simply made its decisions on fabricated
+    bars, and the backtest reported a confident number about them.
+
+    A group is now the bars whose ``open_time`` falls inside one target window, so alignment
+    is a property of the timestamps rather than of where the series happened to start. **A
+    window with fewer bars than the full period is still emitted**, with the bars it has: a
+    partial M15 candle built from real M1 bars is a weaker fact, and dropping it would hide
+    the fact that the market was open and the data is thin. A window with no bars is not
+    emitted, because there is nothing to say.
     """
     if not candles:
         return []
-    ratio = period_seconds(target) // period_seconds(source)
+    target_seconds = period_seconds(target)
+    ratio = target_seconds // period_seconds(source)
     if ratio < 1:
         return []
+
+    buckets: dict[datetime, list[Candle]] = {}
+    for candle in candles:
+        # The window a bar belongs to is its own open time floored to the target period.
+        epoch = int(candle.open_time.timestamp())
+        start = datetime.fromtimestamp(
+            epoch - (epoch % target_seconds), tz=UTC
+        )
+        buckets.setdefault(start, []).append(candle)
+
     grouped: list[Candle] = []
-    for start in range(0, len(candles) - ratio + 1, ratio):
-        window = candles[start : start + ratio]
-        first = window[0]
+    for start in sorted(buckets):
+        window = sorted(buckets[start], key=lambda candle: candle.open_time)
         grouped.append(
             Candle(
-                open_time=first.open_time,
-                open=first.open,
+                open_time=start,
+                open=window[0].open,
                 high=max(candle.high for candle in window),
                 low=min(candle.low for candle in window),
                 close=window[-1].close,
-                timeframe_seconds=period_seconds(target),
+                timeframe_seconds=target_seconds,
                 timeframe=target,
                 volume=sum((candle.volume for candle in window), Decimal("0")),
                 tick_volume=sum(candle.tick_volume for candle in window),

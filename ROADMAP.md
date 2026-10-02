@@ -738,6 +738,35 @@ That is the most useful thing Phase 11 has produced, and it cost one day of inve
 find out. The open question is whether the loss is the entries (the rule) or the exits (a
 trailing stop that gives back too much) or simply the size the risk budget demands.
 
+### `aggregate()` grouped by position, not by timestamp
+
+Found by comparing our M15 candles against the terminal's own. On real data the rule took every
+15th bar and called it an M15 candle — correct only if the series starts exactly on a
+15-minute boundary and contains no gaps, and real data satisfies neither. Alpari's M1 export
+starts at 11:42 and closes for the weekend and for an hour every day.
+
+    1 822 of 2 001 "M15" candles were not on a 15-minute boundary
+    49 of them spanned a session break -- one opening Friday 23:57, closing Saturday 01:13
+    only 179 coincided with the terminal's own M15 bars
+
+The M15 direction filter was reading candles that never existed, with high and low taken across
+gaps. **Nothing crashed**, and the backtest reported a confident number about it. Aggregating by
+timestamp puts all 2 009 produced candles on a 15-minute boundary, in exact agreement with the
+terminal's own bars.
+
+The result flipped from **−219.82 to +1600.82**, and the earlier number was the artefact.
+
+#### The verification that endorsed the bug
+
+The check that found this first *confirmed* it was absent: it compared our candles to the
+terminal's and reported "175/175 agree, 100%". True and worthless — the 179 overlapping bars
+were precisely the ones whose open times matched, so the comparison could only ever confirm the
+subset that was already aligned.
+
+A verification built over a self-selecting subset is not a measurement. Three tests now guard
+it, and the rule is in the handoff: **count every result, not the ones that line up with your
+reference.**
+
 ### The replay was quadratic and unusable on real data
 
 A month of M1 bars took **over twenty-five minutes**. `freeze_closed_bars` sorts and
