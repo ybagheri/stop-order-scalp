@@ -10,9 +10,9 @@
 
 ## Current Phase
 
-**Phase 7 — Lifecycle and Recovery — COMPLETE and green.**
+**Phase 8 — Al Brooks Integration — COMPLETE and green.**
 
-Next phase to execute: **Phase 8 — Al Brooks Integration** (optional, disabled by default).
+Next phase to execute: **Phase 9 — Backtesting / Simulation.**
 
 ---
 
@@ -118,7 +118,9 @@ table.
   change, `ActionKind` and `PositionAction` as the journal-facing vocabulary.
 * `docs/trailing/README.md` and `docs/trailing/TRAILING_MODEL.md
 docs/lifecycle/README.md
-docs/lifecycle/LIFECYCLE.md`.
+docs/lifecycle/LIFECYCLE.md
+docs/integrations/README.md
+docs/integrations/AL_BROOKS.md`.
 * 87 tests in `tests/trailing/`, including monotonicity proved over `hypothesis` walks **and**
   adversarial run-up-then-reversal paths.
 
@@ -156,25 +158,43 @@ Two limitations were carried forward from Phases 5 and 6. Both are closed:
   construction, so it is safe to run at startup before any gate is open.
 * `lifecycle/trade_lifecycle.py` — `TradeLifecycle`, `LifecycleStep`. The loop, plus the
   four-step placement ordering.
-* `docs/lifecycle/README.md` and `docs/lifecycle/LIFECYCLE.md`.
+* `docs/lifecycle/README.md` and `docs/lifecycle/LIFECYCLE.md
+docs/integrations/README.md
+docs/integrations/AL_BROOKS.md`.
 * 140 tests across `tests/unit/test_persistence.py`, `test_state_machine.py`,
   `test_recovery.py` and `test_trade_lifecycle.py`.
 
-### What Phase 8 must preserve
+### What Phase 9 must preserve
 
-Four invariants, each of which a later phase could plausibly break by adding a new send path:
+Five invariants. Phase 9 is the first phase to *replay* history, and a replay is exactly where
+a look-ahead bug and a double-fill both become invisible.
 
-1. **Any new write goes through `place_order`'s ordering** — gate, record, re-read, send once,
-   settle. A new account-changing operation (Phase 8's adapter reaches no broker, but a future
-   exit or re-entry would) needs the ledger write before its send, or the crash window reopens.
+1. **Every send goes through `place_order`'s ordering** — gate, record, re-read, send once,
+   settle. The backtester drives the same `TradeLifecycle` against `SimulatedBroker`; if it
+   grows a shortcut around `place_order`, the crash window reopens and the duplicate checks
+   are bypassed.
 2. **`VERIFYING` must never reach a placement without a broker read.** If a state is added,
-   check that it cannot reach `PENDING_ORDER_PLACED` without passing through `VERIFYING` or
-   `RECONCILING`.
+   check it cannot reach `PENDING_ORDER_PLACED` without passing `VERIFYING` or `RECONCILING`.
 3. **Unresolved *and* unknown intents are both re-observed.** `awaiting_confirmation()` is the
-   query; `unresolved()` alone is not enough, and using it leaves `VERIFYING` with nothing to
-   verify.
-4. **The gate is chosen by the venue and the environment is always passed.** Any new entry
-   point must take `settings` explicitly rather than defaulting it.
+   query; `unresolved()` alone leaves `VERIFYING` with nothing to verify.
+4. **The gate is chosen by the venue and the environment is always passed.** `place()` requires
+   `settings`; `SimulatedGate` refuses `LIVE`.
+5. **The replay must not gain a forming-bar concept.** The engine has none, and neither does
+   this project: `freeze_closed_bars` decides what is closed, and a backtest that hand-feeds a
+   bar the strategy would not have seen is a look-ahead bug that looks like a good result.
+
+### Phase 8 — Al Brooks Integration
+
+* `integrations/al_brooks_adapter.py` — `AlBrooksAdapter`, `AdaptedDecision`,
+  `AlBrooksRefusal`, `import_engine`. The **only** module that may import `albrooks`.
+* `integrations/al_brooks_signal_provider.py` — `AlBrooksSignalProvider`, `ProviderOutcome`,
+  `Source`. Chooses between the baseline and the engine; reaches the engine through an
+  injected factory and cannot reach a broker.
+* `docs/integrations/README.md` and `docs/integrations/AL_BROOKS.md`.
+* 57 tests in `tests/integrations/`, all driven by a **fake engine**.
+
+The default configuration is inert: `enabled=False, allow_geometry=False`, and a test asserts
+the engine factory is *never called* by injecting one that raises.
 
 `ExecutionUnknownError` is **never** retryable, anywhere. `retry.py` re-raises it
 immediately rather than riding it out, precisely so that a placement mistakenly passed in as a
@@ -205,6 +225,8 @@ docs/trailing/README.md
 docs/trailing/TRAILING_MODEL.md
 docs/lifecycle/README.md
 docs/lifecycle/LIFECYCLE.md
+docs/integrations/README.md
+docs/integrations/AL_BROOKS.md
 src/stop_order_scalp/market_data/candles.py
 src/stop_order_scalp/market_data/mt5_module.py
 src/stop_order_scalp/market_data/mt5_feed.py
@@ -229,6 +251,8 @@ src/stop_order_scalp/infrastructure/persistence.py
 src/stop_order_scalp/lifecycle/state_machine.py
 src/stop_order_scalp/lifecycle/recovery.py
 src/stop_order_scalp/lifecycle/trade_lifecycle.py
+src/stop_order_scalp/integrations/al_brooks_adapter.py
+src/stop_order_scalp/integrations/al_brooks_signal_provider.py
 tests/strategy/conftest.py
 tests/strategy/test_candle_direction.py
 tests/strategy/test_entry_rules.py
@@ -255,6 +279,9 @@ tests/unit/test_persistence.py
 tests/unit/test_state_machine.py
 tests/unit/test_recovery.py
 tests/unit/test_trade_lifecycle.py
+tests/integrations/conftest.py
+tests/integrations/test_al_brooks_adapter.py
+tests/integrations/test_al_brooks_signal_provider.py
 tests/unit/test_architecture.py
 tests/unit/test_cli.py
 tests/unit/test_interfaces.py
@@ -263,6 +290,16 @@ tests/unit/test_mt5.py
 ```
 
 ## Files Modified
+
+Phase 8:
+
+```
+src/stop_order_scalp/strategy/signal.py   NoTradeReason gained AL_BROOKS_VETO -- the only
+                                          reason a third party can produce
+docs/integrations/*                        new
+ROADMAP.md, HANDOFF.md, README.md, README.fa.md, docs/architecture/ARCHITECTURE.md,
+CHANGELOG.md, docs/testing/README.md
+```
 
 Phase 7:
 
@@ -363,7 +400,7 @@ tests/conftest.py, tests/unit/*.py            annotations, hermetic .env
 
 ## Tests
 
-1082 passing, 1 skipped.
+1143 passing, 1 skipped.
 
 | File | Tests |
 | --- | --- |
@@ -378,6 +415,7 @@ tests/conftest.py, tests/unit/*.py            annotations, hermetic .env
 | `tests/risk/test_stop_loss_take_profit.py` | 39 |
 | `tests/strategy/test_signal.py` | 37 |
 | `tests/unit/test_trade_lifecycle.py` | 36 |
+| `tests/integrations/test_al_brooks_adapter.py` | 36 |
 | `tests/unit/test_architecture.py` | 35 |
 | `tests/execution/test_mt5_broker.py` | 34 |
 | `tests/unit/test_persistence.py` | 34 |
@@ -390,16 +428,13 @@ tests/conftest.py, tests/unit/*.py            annotations, hermetic .env
 | `tests/unit/test_recovery.py` | 26 |
 | `tests/strategy/test_entry_rules.py` | 25 |
 | `tests/unit/test_logging.py` | 25 |
+| `tests/execution/test_gates.py` | 24 |
 | `tests/trailing/test_break_even.py` | 24 |
 | `tests/strategy/test_strategy.py` | 24 |
 | `tests/trailing/test_trailing_stop.py` | 23 |
+| `tests/integrations/test_al_brooks_signal_provider.py` | 21 |
 | `tests/risk/test_commission.py` | 21 |
-| `tests/execution/test_gates.py` | 24 |
-| `tests/trailing/test_property_monotonic.py
-tests/unit/test_persistence.py
-tests/unit/test_state_machine.py
-tests/unit/test_recovery.py
-tests/unit/test_trade_lifecycle.py` | 13 |
+| `tests/trailing/test_property_monotonic.py` | 13 |
 | `tests/execution/test_order_manager.py` | 13 |
 | `tests/execution/test_retry.py` | 11 |
 
@@ -410,17 +445,17 @@ is genuinely optional.
 ## Test Results
 
 ```
-python -m pytest                             1082 passed, 1 skipped
+python -m pytest                             1143 passed, 1 skipped
 python -m ruff check .                       All checks passed!
-python -m mypy                               Success: no issues found in 92 source files
-python scripts/check_architecture.py         architecture OK: 50 modules checked
+python -m mypy                               Success: no issues found in 97 source files
+python scripts/check_architecture.py         architecture OK: 52 modules checked
 python -m stop_order_scalp validate-config   exit 0
 python -m stop_order_scalp test-connection   exit 3, reports package_installed: false
 ```
 
 ## Git Commit
 
-`feat(lifecycle): write-intent ledger, transition table, and restart recovery`
+`feat(integrations): optional Al Brooks signal source, disabled by default`
 
 ## Git Push
 

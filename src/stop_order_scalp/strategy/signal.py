@@ -58,6 +58,10 @@ class NoTradeReason:
     NO_ENTRY_CANDLE: str = "no_entry_candle"
     INSTRUMENT_NOT_ALLOWED: str = "instrument_not_allowed"
     INSTRUMENT_QUARANTINED: str = "instrument_quarantined"
+    #: The optional Al Brooks engine was consulted and declined. Distinct from every reason
+    #: above because it is the only one produced by a third party, and an operator whose
+    #: trades have quietly stopped needs to be able to say which filter is responsible.
+    AL_BROOKS_VETO: str = "al_brooks_veto"
 
 
 @dataclass(frozen=True, slots=True)

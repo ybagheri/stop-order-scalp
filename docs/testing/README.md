@@ -10,7 +10,7 @@ This page is the short version, and it is accurate today.
 ```bash
 python -m pip install -e ".[dev]"
 
-python -m pytest                             # 1082 tests, 1 skipped
+python -m pytest                             # 1143 tests, 1 skipped
 python -m ruff check .                       # lint
 python -m mypy                               # types, strict, src + tests
 python scripts/check_architecture.py         # architecture boundaries
@@ -53,8 +53,10 @@ python scripts/check_architecture.py         # architecture boundaries
 | `tests/risk/test_commission.py` | 21 | Round-trip versus per-side, and that they differ by exactly two |
 | `tests/trailing/test_property_monotonic.py` | 13 | Monotonicity and idempotency over generated and adversarial paths |
 | `tests/execution/test_order_manager.py` | 13 | Duplicate prevention, and that an unknown outcome is never resent |
+| `tests/integrations/test_al_brooks_adapter.py` | 36 | The action mapping, and that a declining engine never becomes a signal |
+| `tests/integrations/test_al_brooks_signal_provider.py` | 21 | Disabled by default, and the veto when enabled |
 | `tests/execution/test_retry.py` | 11 | Bounded backoff, and that it never rides out an ambiguous send |
-| **Total** | **1083** (1 skipped) | |
+| **Total** | **1144** (1 skipped) | |
 
 The one skip is the cross-check of `freeze_closed_bars` against the independent Al Brooks
 implementation, which needs the optional `albrooks` extra. It is the only skip in the suite

@@ -30,8 +30,7 @@ execution      order and position management, gates (Phase 5, 6)
 trailing       break-even, trailing stop (Phase 6)
 risk           sizing, commission, SL/TP, validation (Phase 4)
 strategy       M15 direction, M1 stop entries (Phase 3)
-integrations   optional third-party adapters (Phase 8)
-market_data    timeframes, candles, ticks, MT5 feed (Phase 2)
+integrations   optional third-party adapters (Phase 8)market_data    timeframes, candles, ticks, MT5 feed (Phase 2)
 infrastructure config, logging, persistence, clock
 domain         value objects, enums, models, exceptions, protocols
 ```
@@ -77,8 +76,10 @@ from the outside arrives as an argument.
 | `lifecycle/state_machine.py` | 7 | Complete — the transition table, the machine, and listeners |
 | `lifecycle/recovery.py` | 7 | Complete — reconcile local state against the broker's book |
 | `lifecycle/trade_lifecycle.py` | 7 | Complete — the loop, and the four-step placement ordering |
+| `integrations/al_brooks_adapter.py` | 8 | Complete — the only module that may import `albrooks` |
+| `integrations/al_brooks_signal_provider.py` | 8 | Complete — baseline vs engine; disabled by default |
 | `cli/main.py` | 1/2 | Contract complete; `validate-config` and `test-connection` implemented |
-| `application/`, `backtest/`, `research/`, `integrations/` | 8–12 | Empty packages, present so the boundary is real from day one |
+| `application/`, `backtest/`, `research/` | 9–12 | Empty packages, present so the boundary is real from day one |
 
 ## 4. The protocols
 
@@ -209,6 +210,37 @@ the system is *unattributable* exposure: a position or working order whose ident
 ledger entry.
 
 See [`docs/lifecycle/LIFECYCLE.md`](../lifecycle/LIFECYCLE.md).
+
+## 4d. An optional source can veto, not vote
+
+The Al Brooks engine is **disabled by default**, and disabled means inert: the engine is not
+constructed, not imported and not consulted, which is asserted by injecting a factory that
+raises if called. The extra stays genuinely optional, because making it required for an import
+would defeat the point of an optional extra.
+
+Two switches, independent on purpose:
+
+| Configuration | Direction from | Geometry from |
+| --- | --- | --- |
+| `enabled: false` — default | the baseline | the baseline |
+| `enabled: true`, `allow_geometry: false` | the engine | the baseline |
+| `enabled: true`, `allow_geometry: true` | the engine | the engine |
+
+Taking direction and geometry from different places is deliberate: an entry level with two
+possible authors cannot be debugged, so the geometry source is recorded in the signal's
+context.
+
+An engine `WAIT` becomes a `NoTrade`, **not** a fallback to the baseline. The engine reports
+`"is_recommendation": false` about its own output, so treating a decline as "ask someone else"
+would read it as a recommendation it disclaims. The consequence is worth stating plainly:
+**enabling the integration can reduce the number of trades.**
+
+Only one module may import `albrooks`, the import is inside a function, and the provider
+reaches the engine through an injected factory — so an AST test can assert the provider cannot
+reach `place_order`, `cancel_order`, `modify_position` or `MetaTrader5`. Adding a third-party
+signal source therefore does not disturb the ordering every send must follow.
+
+See [`docs/integrations/AL_BROOKS.md`](../integrations/AL_BROOKS.md).
 
 ## 5. Numbers are `Decimal`
 
