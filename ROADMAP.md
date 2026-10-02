@@ -536,74 +536,123 @@ refuse-to-overwrite are proved against an injected `OSError`, not a power cut.
 
 ---
 
-## Phase 8 — Al Brooks Integration — `pending`
+## Phase 8 — Al Brooks Integration — `removed`
 
-Implement:
+**Removed, with the reason recorded rather than quietly deleted.**
 
-* `integrations/al_brooks_adapter.py`: map `Decision.action` + `Decision.plan` to a
-  domain signal
-* `integrations/al_brooks_signal_provider.py`
-* Optional extra `[albrooks]`; the only module importing `albrooks`
-* **Disabled by default.** The M15/M1 baseline rules remain authoritative unless
-  `integrations.al_brooks.enabled` is explicitly true
-* Never invent signals; a `WAIT`/`NO_TRADE` decision is not a signal
+The Phase 0 audit found two unrelated projects sitting in sibling directories on the
+development machine — `auto-trade` and `al-brooks-price-action-engine` — and treated them as
+"sibling projects" of this one. Phase 8 was then planned to integrate the second. Nobody asked
+for it: the request was a simple system that places pending orders, and a third-party signal
+source is a decision about *strategy*, not about plumbing.
 
-Gate: adapter tests using a fake engine, commit, push.
+The whole phase was built, then reverted. What survives is the seam it needed — the strategy
+is a façade over frozen settings, so another source could be added later without touching the
+layers below. The Al Brooks code itself, its tests and its documentation are gone.
 
----
-
-## Phase 9 — Backtesting / Simulation — `pending`
-
-Implement:
-
-* `backtest/data.py`: historical candle loading
-* `backtest/engine.py`: replay against `SimulatedBroker` with bid/ask, spread, slippage
-* SL/TP, break-even, trailing, commission, equity curve
-* `backtest/statistics.py`: trade count, win rate, average R, expectancy, profit factor,
-  max drawdown, consecutive losses, Sharpe/Sortino, commission impact, slippage sensitivity
-* Walk-forward / train / validation / out-of-sample split support
-* Live execution and simulation stay fully separate
-
-Gate: simulation tests, statistics tests, commit, push.
+Mixing in another method is a **future** intent, not this phase. When it happens it should be
+a deliberate, measured decision with the baseline still available to compare against — not a
+default that quietly takes over.
 
 ---
 
-## Phase 10 — Observability — `pending`
+## Phase 9 — Make It Run — `complete`
+
+The one deliverable that matters: **`run --dry-run` actually runs.**
+
+After seven phases the system had 1082 passing tests and could not start. Every layer was
+built and none of them were wired together, so the honest state was "a large pile of
+well-tested parts and no program". That is what this phase fixes.
+
+Delivered:
+
+* `application/service.py` — `build_service(...)`, the composition root the CLI expected
+  since Phase 1. Wires the venue, strategy, risk, order manager, position manager and
+  lifecycle, and runs a bounded number of cycles.
+* `infrastructure/persistence.py` — `JsonStateLedger`, the name the CLI expected, with
+  `.journal(limit=)` and a context manager.
+* `run --dry-run` against `SimulatedBroker` with no MetaTrader 5 installed, printing what
+  it did on every cycle. `run --candles PATH` reads real history;
+  `run --m15 PATH` supplies the direction series separately.
+* `run --live` is refused **by name**, with the reason, rather than failing obscurely.
+* **The rule stays configurable.** Every number lives in `config/default.yaml`.
+
+`run` and `journal` now exit 0. `status`, `diagnostics` and `backtest` still exit 4 and say so.
+
+### What running found that testing did not
+
+Four bugs, all invisible to 1082 passing component tests:
+
+* **Every order was born expired.** `OrderManager.intent_for(plan, now=...)` passed `now`
+  through as the *expiration*, so an order created at time *t* expired at *t*. The unit tests
+  all called it without `now`, so that branch was never taken. The expiry now comes from
+  `order.lifetime_seconds`.
+* **The lifecycle was moved into the wrong enum.** `PositionManager` returns a
+  `PositionState`; the machine expects `LifecycleState`. Both are `StrEnum`, so the wrong one
+  was stored silently and raised `AttributeError` three cycles later. There is now an
+  explicit translation table.
+* **The strategy→risk bridge did not exist.** The strategy produces a `TradeDecision`; the
+  order manager needs a sized `TradePlan`. Nothing connected them, so every decision counted
+  as "not a plan" and **no order was ever placed**. It lives in the composition root, because
+  neither layer may depend on the other.
+* **The report showed the plan beside the action**, so a `trailed` line quoted the intended
+  level rather than the stop the broker actually held. It is now read back from the broker.
+
+Two tests also asserted *about the machine* rather than about the code — "MetaTrader5 is
+genuinely not installed in the test environment" — which stopped being true when
+`metatrader5 5.0.6231` appeared. Both now force the import to fail.
+
+**The lesson, recorded because it is the whole point of this phase:** a green suite over
+unconnected modules is a statement about the modules. 1082 tests passed while the program
+could not start.
+
+---
+
+## Phase 10 — Backtest and Statistics — `pending`
+
+Only after the dry run works. Replay historical candles through the *same* lifecycle, against
+`SimulatedBroker`, and report the distribution rather than a single number: profit factor,
+maximum drawdown, trade count, and the result of **not** trading.
+
+The last one is deliberate. A scalping system whose edge is a handful of points will look
+remarkable on one sample and ordinary on another, and the only way to know which is to count
+the trades it declined.
 
 Implement:
 
-* `status` command output
-* `journal` command — closed-trade journal from persistence
-* `diagnostics` command — environment, config, MT5 reachability bundle
-* Structured logging coverage for every field listed in the specification
-
-Gate: CLI contract tests, commit, push.
+* `backtest/data.py` — historical candle loading
+* `backtest/engine.py` — replay through `TradeLifecycle` and `SimulatedBroker`
+* `backtest/statistics.py` — the distribution above, plus a no-trade baseline
 
 ---
 
 ## Phase 11 — Demo Validation — `pending`
 
-* Run read-only validation against the user's MT5 demo terminal
-* Capture the real `US30` symbol specification into `docs/mt5/SYMBOL_SPECIFICATIONS.md`
-* Confirm dry-run → paper → demo progression end to end
-* **Never** switch to live automatically
-* Document results in `docs/operations/DEMO_VALIDATION.md`
+A real MetaTrader 5 **demo** account. `MetaTrader5` is not installed on the development
+machine, so every wire value, retcode and specification this project uses is still unverified
+against reality — the classification table and the broker-limit semantics in particular.
 
-Gate: report committed, no live trading occurred, commit, push.
+Implement:
+
+* capture the real `US30` specification and replace the assumed one
+* verify the retcode table against actual failures
+* run the dry run against a demo terminal and compare it to the backtest
+
+Nothing in this project should touch a **live** account until Phase 11 has run for long
+enough to mean something. `LIVE` is gated three times over and that is not decoration.
 
 ---
 
-## Phase 12 — Research / Optimization Layer — `pending`
+## Later — combining with another method
 
-Isolated, **disabled by default**, and must not modify the baseline:
+Recorded because it is a stated intent, not because it is planned. When it happens:
 
-* `research/filters.py`: spread, ATR volatility, M1 candle quality, M15 candle strength,
-  session, pending-order expiration, one-trade-per-candle, optional news
-* `research/optimize.py`: parameter sweeps over the backtest engine
-* `research/report.py`: train / validation / out-of-sample / walk-forward reporting
-* `docs/research/` with findings, including negative results
+* the baseline must remain available, so the two can be compared rather than assumed additive;
+* a signal source may **veto**, and it may not quietly become the only source;
+* every switch defaults to off, and a switch that is off changes nothing at all.
 
-Gate: research tests; baseline still reproducible from `config/default.yaml` alone; commit, push.
+`docs/architecture/ARCHITECTURE.md` §2 keeps `integrations` as a layer for exactly this, and
+`domain/interfaces.py` already declares the protocols a new source would implement.
 
 ---
 

@@ -25,7 +25,7 @@ from __future__ import annotations
 
 from collections.abc import Sequence
 from dataclasses import dataclass
-from datetime import datetime
+from datetime import datetime, timedelta
 from typing import Any
 
 from stop_order_scalp.domain.exceptions import (
@@ -289,13 +289,28 @@ class OrderManager:
         """
         return bool(broker.cancel_order(ticket))
 
-    def intent_for(self, plan: TradePlan, *, now: datetime | None = None) -> OrderIntent:
-        """The intent that *would* be sent. For a dry run and for the journal."""
+    def intent_for(
+        self, plan: TradePlan, *, now: datetime | None = None
+    ) -> OrderIntent:
+        """The intent that *would* be sent, with its expiry resolved from configuration.
+
+        ``order.lifetime_seconds`` decides the expiry, never ``now``. An earlier version
+        passed ``now`` straight through as the expiration, so **every order was born expired**
+        and a venue with any expiry rule removed it before price could reach it. Nothing in
+        the unit tests caught it, because they called this without ``now``.
+
+        ``now`` is accepted and used only to add the lifetime to a concrete moment, so a
+        caller with a clock gets an absolute expiry rather than a relative one.
+        """
+        lifetime = self._orders.lifetime_seconds
+        expiration = (
+            None if lifetime is None or now is None else now + timedelta(seconds=lifetime)
+        )
         return OrderIntent.from_plan(
             plan,
             magic_number=self.magic_number,
             deviation_points=self._orders.deviation_points,
-            expiration=now,
+            expiration=expiration,
         )
 
     def active_orders(self, broker: Broker, symbol: str | None = None) -> Sequence[OrderRecord]:

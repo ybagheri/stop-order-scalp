@@ -56,6 +56,7 @@ from stop_order_scalp.domain.models import OrderIntent, OrderRecord
 
 __all__ = [
     "IntentOutcome",
+    "JsonStateLedger",
     "LedgerEntry",
     "StateLedger",
     "atomic_write_json",
@@ -437,6 +438,40 @@ class StateLedger:
             f"StateLedger({self._path}, entries={len(self._entries)}, "
             f"unresolved={len(self.unresolved())})"
         )
+
+
+class JsonStateLedger(StateLedger):
+    """The name the CLI has expected for :class:`StateLedger` since Phase 1.
+
+    A subclass rather than an alias, and deliberately thin. The CLI asks for this name by
+    string, so renaming the class under it would have been a silent break; a subclass keeps the
+    name meaningful while staying a single implementation.
+
+    Adds a context manager, which is how the ``journal`` command wants to use it: a context
+    manager that flushes on exit is a reminder that durability is a property of the write, not
+    of a later flush someone might forget.
+    """
+
+    def __enter__(self) -> JsonStateLedger:
+        return self
+
+    def __exit__(self, *_: object) -> None:
+        self.flush()
+
+    @classmethod
+    def open(cls, path: Path) -> JsonStateLedger:
+        return cls.load(path)  # type: ignore[return-value]
+
+    def journal(self, limit: int) -> list[dict[str, Any]]:
+        """The most recent ``limit`` entries, newest last.
+
+        The journal is a subset of the ledger, not a second store: an intent that was recorded
+        is an intent the operator should be able to read back. Ordering is by record time, so
+        the last element is the most recent.
+        """
+        entries = self.entries()
+        selected = entries[-limit:] if limit > 0 else ()
+        return [entry.to_dict() for entry in selected]
 
 
 def _as_state(raw: object) -> LifecycleState:

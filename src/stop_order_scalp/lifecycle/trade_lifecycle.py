@@ -63,7 +63,7 @@ from dataclasses import dataclass
 from datetime import datetime
 from typing import Any
 
-from stop_order_scalp.domain.enums import LifecycleState, TradeEventKind
+from stop_order_scalp.domain.enums import LifecycleState, PositionState, TradeEventKind
 from stop_order_scalp.domain.exceptions import (
     BrokerNotConnectedError,
     ExecutionUnknownError,
@@ -518,8 +518,8 @@ class TradeLifecycle:
                 continue
             actions.append(action.kind)
             self._events.append(TradeEventKind.TRADE_EVENT_SL_MODIFIED)
-            target = action.next_state
-            if self._machine.can(target):
+            target = _lifecycle_state_for(action.next_state)
+            if target is not None and self._machine.can(target):
                 self._machine.move(target, reason=action.kind)
         return actions
 
@@ -619,6 +619,33 @@ class TradeLifecycle:
         self._notes.append(f"{len(appeared)} position(s) opened")
         self._adopt_open_position("order filled")
         return self._step(tuple(f"opened:{p.ticket}" for p in appeared))
+
+
+#: ``PositionState`` -> ``LifecycleState``.
+#:
+#: The two enums are deliberately different vocabularies -- one describes a *trade*, the other
+#: what the *system* is doing -- and passing a value from one to the other is a bug that only
+#: shows up at runtime, because both are ``StrEnum`` and the machine stores either without
+#: complaint. The first version of :meth:`TradeLifecycle._manage_positions` did exactly that
+#: and put the lifecycle into a ``PositionState``, where the next ``quiet`` check raised
+#: ``AttributeError`` three cycles into a dry run. An explicit table is the fix; the
+#: alternative is one vocabulary pretending to be both.
+_POSITION_TO_LIFECYCLE: dict[PositionState, LifecycleState] = {
+    PositionState.POSITION_OPEN: LifecycleState.STATE_POSITION_OPEN,
+    PositionState.POSITION_BREAK_EVEN_ARMED: LifecycleState.STATE_BREAK_EVEN_ARMED,
+    PositionState.POSITION_TRAILING: LifecycleState.STATE_TRAILING,
+    PositionState.POSITION_CLOSED: LifecycleState.STATE_POSITION_CLOSED,
+}
+
+
+def _lifecycle_state_for(next_state: PositionState) -> LifecycleState | None:
+    """Translate a position's next state into the system's, or ``None`` if it has no bearing.
+
+    ``None`` for the rest of the vocabulary on purpose: a state such as
+    ``POSITION_CANCELLED`` says something about a trade, not about what the system should do
+    next, and guessing would move the machine on the strength of a word.
+    """
+    return _POSITION_TO_LIFECYCLE.get(next_state)
 
 
 def _describe(result: Reconciliation) -> str:

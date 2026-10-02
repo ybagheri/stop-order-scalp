@@ -33,12 +33,56 @@ from stop_order_scalp.domain.exceptions import ComponentNotAvailableError
 #: market-data concern rather than an execution one. It now runs and reports a structured
 #: result, exiting 3 when the terminal is unreachable.
 DEFERRED_COMMANDS: tuple[tuple[str, ...], ...] = (
-    ("run", "--dry-run"),
     ("status",),
-    ("journal",),
     ("diagnostics",),
     ("backtest",),
 )
+
+#: Commands that have been built and now exit 0. Kept beside the deferred list rather than
+#: deleted from the test, so a regression to "not implemented yet" is a visible failure
+#: instead of a silently smaller suite.
+BUILT_COMMANDS: tuple[tuple[str, ...], ...] = (
+    ("run", "--dry-run"),
+    ("journal",),
+)
+
+
+@pytest.mark.parametrize("argv", BUILT_COMMANDS)
+def test_a_built_command_exits_ok(
+    argv: tuple[str, ...], hermetic_env_file: Path
+) -> None:
+    code, out, err = _run([*argv, "--env-file", str(hermetic_env_file)])
+    assert code == EXIT_OK, f"{argv} exited {code}: {err}"
+    assert json.loads(out), "a built command must print a structured result"
+
+
+def test_a_dry_run_reports_what_it_did(hermetic_env_file: Path) -> None:
+    """The one command whose whole purpose is to be *seen*.
+
+    Asserted on content rather than on the exit code alone: a dry run that exits 0 while
+    reporting nothing would satisfy the weaker test and be useless to the operator.
+    """
+    code, out, _ = _run(["run", "--dry-run", "--max-cycles", "30", "--env-file", str(hermetic_env_file)])
+    assert code == EXIT_OK
+    report = json.loads(out)
+    assert report["environment"] == "DRY_RUN"
+    assert report["cycles"], "a dry run must report the cycles it ran"
+    assert report["rule"]["symbol"] == "US30"
+    # Every cycle states what it did, so "nothing happened" is distinguishable from
+    # "something happened and was not reported".
+    assert all("action" in cycle for cycle in report["cycles"])
+
+
+def test_live_is_refused_with_a_reason(hermetic_env_file: Path) -> None:
+    """--live must be refused by name, not fail obscurely.
+
+    Every wire value and retcode this project uses is still unverified against a real
+    terminal, so the refusal is the honest answer and the message has to say why.
+    """
+    code, _, err = _run(["run", "--live", "--env-file", str(hermetic_env_file)])
+    assert code == EXIT_UNAVAILABLE
+    assert "not available" in err
+    assert "Traceback" not in err
 
 
 @pytest.fixture

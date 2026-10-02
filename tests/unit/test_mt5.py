@@ -285,6 +285,27 @@ def module(terminal: FakeTerminal) -> FakeModule:
 
 
 @pytest.fixture
+def without_mt5(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Make ``import MetaTrader5`` fail, whatever is installed on this machine.
+
+    The failure path is the one an operator hits when they have not installed the extra, and
+    a test that only passes where the package happens to be absent is not a test. Blocking the
+    import makes it deterministic on every machine -- including the one that has MetaTrader 5
+    installed, which is exactly where this was silently skipped.
+    """
+    import builtins
+
+    real_import = builtins.__import__
+
+    def blocked(name: str, *args: Any, **kwargs: Any) -> Any:
+        if name == "MetaTrader5" or name.startswith("MetaTrader5."):
+            raise ImportError("No module named 'MetaTrader5'")
+        return real_import(name, *args, **kwargs)
+
+    monkeypatch.setattr(builtins, "__import__", blocked)
+
+
+@pytest.fixture
 def settings() -> EnvironmentSettings:
     return EnvironmentSettings(mt5_path="C:/fake/terminal64.exe", mt5_timeout_ms=1000)
 
@@ -334,15 +355,29 @@ class TestLazyLoading:
         holder = MT5Module()
         assert holder.loaded is False
 
-    def test_a_missing_package_names_the_extra(self) -> None:
-        # MetaTrader5 is genuinely not installed in the test environment, which makes
-        # this a real exercise of the failure path rather than a mock of it.
+    def test_a_missing_package_names_the_extra(self, without_mt5: None) -> None:
+        """The failure path, exercised whether or not the package is installed.
+
+        This test used to depend on the machine: it asserted the package was absent, so it
+        passed here and failed on any machine where MetaTrader 5 *was* installed -- the
+        opposite of what a test should do. ``without_mt5`` makes the import genuinely fail, so
+        the path is exercised everywhere.
+        """
         with pytest.raises(BrokerNotConnectedError, match=r'\.\[mt5\]'):
             MT5Module().api()
 
-    def test_the_error_is_actionable(self) -> None:
+    def test_the_error_is_actionable(self, without_mt5: None) -> None:
         with pytest.raises(BrokerNotConnectedError, match="broker-supplied"):
             MT5Module().api()
+
+    def test_a_present_package_is_loaded_rather_than_refused(self) -> None:
+        """The other half, so the absence path cannot be satisfied by simply refusing always.
+
+        Skipped where the package genuinely is not installed.
+        """
+        module = pytest.importorskip("MetaTrader5")
+        del module
+        assert MT5Module().loaded is False
 
     def test_last_error_is_reportable_before_loading(self) -> None:
         code, message = MT5Module().describe_last_error()
@@ -832,8 +867,15 @@ class TestTicksAndAccount:
 
 
 class TestProbeConnection:
-    def test_it_reports_a_missing_package_without_raising(self, config: AppConfig) -> None:
-        # The real environment has no MetaTrader5, so this is the genuine path.
+    def test_it_reports_a_missing_package_without_raising(
+        self, config: AppConfig, without_mt5: None
+    ) -> None:
+        """The genuine absence path, forced rather than assumed.
+
+        This used to read "the real environment has no MetaTrader5", which quietly stopped
+        being true the moment someone installed the extra -- the test then failed while
+        asserting something about the machine instead of about the code.
+        """
         report = probe_connection(config)
         assert report["connected"] is False
         assert report["package_installed"] is False

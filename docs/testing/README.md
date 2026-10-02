@@ -10,7 +10,7 @@ This page is the short version, and it is accurate today.
 ```bash
 python -m pip install -e ".[dev]"
 
-python -m pytest                             # 1082 tests, 1 skipped
+python -m pytest                             # 1116 tests, 1 skipped
 python -m ruff check .                       # lint
 python -m mypy                               # types, strict, src + tests
 python scripts/check_architecture.py         # architecture boundaries

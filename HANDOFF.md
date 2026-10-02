@@ -10,9 +10,68 @@
 
 ## Current Phase
 
-**Phase 7 — Lifecycle and Recovery — COMPLETE and green.**
+**Phase 9 — Make It Run — COMPLETE and green. `run --dry-run` works.**
 
-Next phase to execute: **Phase 8 — Al Brooks Integration** (optional, disabled by default).
+Next phase to execute: **Phase 10 — Backtest and Statistics** (only after a human has looked
+at the dry run's output).
+
+## Phase 8 — Al Brooks Integration: removed
+
+Built, then reverted. The Phase 0 audit found two unrelated projects in sibling directories
+on the development machine and planned an integration with one of them; nobody asked for it.
+A third-party *signal source* is a decision about strategy, not about plumbing. The code, its
+tests and its documentation are gone. The seam it needed survives — the strategy is a façade
+over frozen settings, so another source could be added later without touching anything below.
+
+## What Phase 10 must preserve
+
+1. **Every send goes through `place_order`'s ordering** — gate, record, re-read, send once,
+   settle. The backtester drives the same `TradeLifecycle` against `SimulatedBroker`; a
+   shortcut around `place_order` reopens the crash window and bypasses the duplicate checks.
+2. **`VERIFYING` must never reach a placement without a broker read.**
+3. **Unresolved *and* unknown intents are both re-observed** — `awaiting_confirmation()`,
+   never `unresolved()` alone.
+4. **The gate is chosen by the venue and `settings` is always passed**; `SimulatedGate`
+   refuses `LIVE`.
+5. **The replay must not gain a forming-bar concept.** `freeze_closed_bars` decides what is
+   closed. A backtest that hand-feeds a bar the strategy would not have seen is a look-ahead
+   bug shaped like a good result.
+
+## Phase 9 — Make It Run — COMPLETE
+
+* `application/service.py` — `build_service`, `TradingService`, the strategy→risk→plan
+  bridge, `load_candles_csv`, `synthetic_candles`, `aggregate`.
+* `infrastructure/persistence.py` — `JsonStateLedger`, the name the CLI expected since
+  Phase 1, with `.journal(limit=)` and a context manager.
+* `cli/main.py` — `run --candles PATH` and `run --m15 PATH`; `--live` refused by name.
+* `tests/application/test_service.py` — 31 tests, all by *running* the assembled system.
+* `run` and `journal` now exit 0. `status`, `diagnostics`, `backtest` still exit 4 honestly.
+
+### Bugs only running could find
+
+All four were invisible to 1082 passing component tests:
+
+* **Every order was born expired.** `OrderManager.intent_for(plan, now=...)` passed `now`
+  straight through as the *expiration*, so an order created at time *t* expired at *t*. The
+  unit tests all called it without `now`, so the branch was never taken. The expiry now comes
+  from `order.lifetime_seconds`, with `now` only anchoring it.
+* **The lifecycle was moved into the wrong enum.** `PositionManager` returns a
+  `PositionState`; the lifecycle stored it in a machine that expects `LifecycleState`. Both
+  are `StrEnum`, so it was accepted silently and raised `AttributeError` three cycles later
+  on `quiet`. There is now an explicit `PositionState → LifecycleState` table.
+* **The strategy→risk bridge did not exist.** The strategy produces a `TradeDecision`; the
+  order manager needs a sized `TradePlan`. Nothing connected them, so every decision was
+  treated as "not a plan" and no order was ever placed. It lives in the composition root
+  because neither layer may depend on the other.
+* **The report showed the plan next to the action.** "planned 0.4 lots at 40007.2" printed
+  beside a stop that had moved to 40011.7. The detail is now read back from the broker.
+
+### Also fixed
+
+Two tests asserted *about the machine* rather than about the code: "MetaTrader5 is genuinely
+not installed in the test environment". True when written, false once `metatrader5
+5.0.6231` was installed — and the tests then failed while saying nothing useful. Both now
+force the import to fail, so they exercise the path on every machine.
 
 ---
 
@@ -363,7 +422,7 @@ tests/conftest.py, tests/unit/*.py            annotations, hermetic .env
 
 ## Tests
 
-1082 passing, 1 skipped.
+1116 passing, 1 skipped.
 
 | File | Tests |
 | --- | --- |
@@ -404,16 +463,17 @@ tests/unit/test_trade_lifecycle.py` | 13 |
 | `tests/execution/test_retry.py` | 11 |
 
 The single skip is the `albrooks` cross-check of `freeze_closed_bars`, which needs the
-optional extra. It is the only skip in the suite, and is acceptable only because that extra
-is genuinely optional.
+optional extra. It is the only skip in the suite, and is acceptable only because that
+extra is genuinely optional. The skip is about the *candle* agreement, not about the
+integration that was removed in Phase 8.
 
 ## Test Results
 
 ```
-python -m pytest                             1082 passed, 1 skipped
+python -m pytest                             1116 passed, 1 skipped
 python -m ruff check .                       All checks passed!
-python -m mypy                               Success: no issues found in 92 source files
-python scripts/check_architecture.py         architecture OK: 50 modules checked
+python -m mypy                               Success: no issues found in 95 source files
+python scripts/check_architecture.py         architecture OK: 51 modules checked
 python -m stop_order_scalp validate-config   exit 0
 python -m stop_order_scalp test-connection   exit 3, reports package_installed: false
 ```
@@ -437,18 +497,19 @@ src/stop_order_scalp/
     market_data/     IMPLEMENTED — timeframes, candles/freeze, mt5_module, mt5_feed
     strategy/        IMPLEMENTED — candle_direction, entry_rules, signal, strategy
     risk/            IMPLEMENTED — commission, position_sizer, stop_loss, take_profit, manager
-    execution/       empty      Phases 5, 6
-    trailing/        empty      Phase 6
-    lifecycle/       empty      Phase 7
-    integrations/    empty      Phase 8
-    backtest/        empty      Phase 9
-    research/        empty      Phase 12
-    application/     empty      composition + orchestration
-    cli/             IMPLEMENTED — contract + validate-config + test-connection
-tests/              unit (414) + strategy (119) + risk (140)
-config/default.yaml  strategy defaults
-scripts/             check_architecture.py
-```
+    execution/       IMPLEMENTED — gates, order_manager, mt5_broker, simulated_broker,
+                                 retry, position_manager
+    trailing/        IMPLEMENTED — break_even, trailing_stop
+    lifecycle/       IMPLEMENTED — state_machine, recovery, trade_lifecycle
+    integrations/    empty      reserved for a future signal source
+    backtest/        empty      Phase 10
+    research/        empty      reserved
+    application/     IMPLEMENTED — service.py, the composition root
+    cli/             IMPLEMENTED — contract + validate-config, test-connection, run, journal
+    tests/              unit + strategy + risk + execution + trailing + application
+    config/default.yaml  strategy defaults
+    scripts/             check_architecture.py
+    ```
 
 Dependency direction is strictly inward. `strategy`, `risk`, `trailing`, `lifecycle` and
 `domain` must not import `MetaTrader5`. `scripts/check_architecture.py` enforces this and
@@ -518,11 +579,10 @@ Phases 5 through 12, exactly as listed in `ROADMAP.md`. In order:
 5. Order execution
 6. Position management
 7. Lifecycle and recovery
-8. Al Brooks integration
-9. Backtesting / simulation
-10. Observability
+8. Al Brooks integration -- **removed**, see Current Phase
+9. Make it run -- done
+10. Backtest and statistics
 11. Demo validation
-12. Research / optimization
 
 ## Known Issues
 
@@ -555,8 +615,7 @@ Phases 5 through 12, exactly as listed in `ROADMAP.md`. In order:
   $100. Phase 11 captures the real values; see
   [`docs/mt5/SYMBOL_SPECIFICATIONS.md`](docs/mt5/SYMBOL_SPECIFICATIONS.md).
 * **`albrooks` is not installed here**, so the `freeze_closed_bars` cross-check skips.
-  Phase 8's adapter needs `pip install -e ".[albrooks]"`. This is the **only** skip in the
-  suite.
+  It needs `pip install -e ".[albrooks]"`. This is the **only** skip in the suite.
 * **No profitability is claimed and none has been tested.** No backtest has been run
   against real data.
 * `docs/{risk,testing,operations,research}/` contain a `README.md` only — useful, but not
@@ -585,11 +644,10 @@ Phases 5 through 12, exactly as listed in `ROADMAP.md`. In order:
    so there is no filter that could be forgotten.
 9. **Configuration layering:** `config/default.yaml` → `.env` → real `SOS_*` environment
    variables, where a real environment variable beats `.env`.
-10. **Al Brooks is optional and disabled by default.** A geometry suggestion, not a signal.
-11. **Two independent candle implementations must agree** — this project's
+10. **Two independent candle implementations must agree** — this project's
     `market_data/candles.py` and the sibling engine's `freeze_closed_bars`. Cross-tested.
-12. **No absolute paths in application code.** Only `.env` and relative resolution.
-13. **The CLI surface is fixed before its implementations.** An unbuilt command raises
+11. **No absolute paths in application code.** Only `.env` and relative resolution.
+12. **The CLI surface is fixed before its implementations.** An unbuilt command raises
     `ComponentNotAvailableError` and exits **4**, never an `ImportError` traceback. Added
     during Phase 1 stabilisation; the alternative was six `mypy` errors against modules
     that do not exist yet.
@@ -647,7 +705,7 @@ Environment variable prefix: **`SOS_`**.
 Planned keys: `SOS_ENVIRONMENT`, `SOS_ALLOW_LIVE`, `SOS_ALLOW_ORDER`, `SOS_ALLOW_CLOSE`,
 `SOS_MT5_PATH`, `SOS_MT5_LOGIN`, `SOS_MT5_PASSWORD`, `SOS_MT5_SERVER`, `SOS_MT5_TIMEOUT_MS`,
 `SOS_SYMBOL`, `SOS_MAGIC_NUMBER`, `SOS_CONFIG_PATH`, `SOS_STATE_PATH`, `SOS_LOG_DIR`,
-`SOS_ENV_FILE`, `SOS_AL_BROOKS_ENABLED`.
+`SOS_ENV_FILE`.
 
 **`SOS_MT5_PASSWORD` is a secret. It lives only in `.env`, which is git-ignored. Never
 commit it, never log it.** It is reduced to a presence flag at load time and no downstream
@@ -716,8 +774,7 @@ land with `execution/gates.py` and its tests.
 * **Prefer `python -m pytest` / `python -m stop_order_scalp`** over console scripts.
 * **Only `market_data/mt5_module.py`, `market_data/mt5_feed.py` and
   `execution/mt5_broker.py` may import `MetaTrader5`**, and only inside a function body —
-  and only `mt5_module.py` actually contains the `import`. Only
-  `integrations/al_brooks_adapter.py` may import `albrooks`.
+  and only `mt5_module.py` actually contains the `import`.
 * **Test isolation is by construction** — protocols plus hand-written fakes. No mocking
   framework, no skip markers, and no MT5 in the unit suite at all.
 * **Use `Decimal` everywhere** for money, price and volume. `float` at the MT5 boundary

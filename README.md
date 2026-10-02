@@ -7,14 +7,18 @@
 > **Status: under active development.** See [`ROADMAP.md`](ROADMAP.md) for what exists
 > today and [`HANDOFF.md`](HANDOFF.md) for the state of the last completed phase.
 >
-> **Phases 1–7 complete** (foundation, market data, core strategy, risk engine, order
-> execution, position management, lifecycle and recovery). The domain layer, configuration,
-> logging, the MetaTrader 5 feed, the closed-candle freeze, the M15/M1 baseline decision, the
-> position sizer, the idempotent order manager, the monotonic trailing stop and the
-> write-intent lifecycle are implemented and tested — **1082 tests, no broker required**. Of
-> the seven CLI commands below, `validate-config` and `test-connection` work; the rest exit
-> **4** and say which phase has not landed. The command surface is fixed ahead of its
-> implementations on purpose, so the contract is testable now.
+> **Phases 1–7 complete, and it runs.** The domain layer, configuration, logging, the
+> MetaTrader 5 feed, the closed-candle freeze, the M15/M1 baseline decision, the position
+> sizer, the idempotent order manager, the monotonic trailing stop and the write-intent
+> lifecycle are implemented, **wired together**, and tested — **1116 tests, no broker
+> required**. `run --dry-run` executes the whole pipeline against a simulated venue and
+> prints what it did on every cycle. Of the seven CLI commands, `validate-config`,
+> `test-connection`, `run` and `journal` work; the rest exit **4** and say which phase has
+> not landed.
+>
+> **The rule is configuration, not code.** Direction timeframe, entry offset, stop, target,
+> risk percentage and commission all live in
+> [`config/default.yaml`](config/default.yaml) — change them there, not in the code.
 >
 > **No profitability is claimed.** See [`docs/strategy/BASELINE.md`](docs/strategy/BASELINE.md).
 >
@@ -22,7 +26,6 @@
 > `DRY_RUN`, then `PAPER`, then a demo account. `LIVE` is not implemented and is gated
 > three times over; read [`docs/operations/`](docs/operations/) before going anywhere near
 > it.
-
 ---
 
 ## Purpose
@@ -105,7 +108,7 @@ Part of the contract, because a supervisor process depends on them.
 ## Development
 
 ```bash
-python -m pytest                             # 1082 tests
+python -m pytest                             # 1116 tests
 python -m ruff check .                       # lint
 python -m mypy                               # types, strict, src + tests
 python scripts/check_architecture.py         # architecture boundaries

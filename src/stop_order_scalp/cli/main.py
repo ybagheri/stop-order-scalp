@@ -135,6 +135,24 @@ def build_parser() -> argparse.ArgumentParser:
     )
     run.add_argument("--max-cycles", type=int, default=None, help="stop after this many decision cycles")
     run.add_argument("--interval", type=float, default=None, help="override execution.poll_interval_seconds")
+    run.add_argument(
+        "--candles",
+        type=Path,
+        default=None,
+        metavar="PATH",
+        help=(
+            "historical candles as CSV (time,open,high,low,close) for a dry run. "
+            "Without it a deterministic synthetic series is used, which proves the wiring "
+            "but says nothing about the strategy."
+        ),
+    )
+    run.add_argument(
+        "--m15",
+        type=Path,
+        default=None,
+        metavar="PATH",
+        help="separate M15 CSV for the direction filter; defaults to the --candles series",
+    )
 
     subparsers.add_parser("status", parents=[common], help="report connection, account, symbol and state")
     subparsers.add_parser("validate-config", parents=[common], help="validate configuration and exit")
@@ -234,9 +252,43 @@ def _cmd_test_connection(args: argparse.Namespace, config: AppConfig, out: TextI
 
 def _cmd_run(args: argparse.Namespace, config: AppConfig, out: TextIO, err: TextIO) -> int:
     build_service = _resolve("stop_order_scalp.application.service", "build_service")
+    load_candles_csv = _resolve(
+        "stop_order_scalp.application.service", "load_candles_csv"
+    )
+    synthetic_candles = _resolve(
+        "stop_order_scalp.application.service", "synthetic_candles"
+    )
+    aggregate = _resolve("stop_order_scalp.application.service", "aggregate")
+    LiveTradingUnavailable = _resolve(
+        "stop_order_scalp.application.service", "LiveTradingUnavailable"
+    )
 
-    service = build_service(config, dry_run=args.dry_run, paper=args.paper, live=args.live)
-    cycles = service.run(max_cycles=args.max_cycles, interval=args.interval)
+    entry_timeframe = config.strategy.entry.timeframe
+    candles = (
+        load_candles_csv(args.candles, timeframe=entry_timeframe)
+        if args.candles is not None
+        else synthetic_candles(120, timeframe=entry_timeframe)
+    )
+    m15 = (
+        load_candles_csv(args.m15, timeframe=config.strategy.entry.direction_timeframe)
+        if args.m15 is not None
+        else aggregate(candles, entry_timeframe, config.strategy.entry.direction_timeframe)
+    )
+
+    try:
+        service = build_service(
+            config,
+            dry_run=args.dry_run,
+            paper=args.paper,
+            live=args.live,
+            candles=candles,
+            m15_candles=m15,
+        )
+    except LiveTradingUnavailable as exc:
+        _fail(err, EXIT_UNAVAILABLE, str(exc))
+        return EXIT_UNAVAILABLE
+
+    cycles = service.run(max_cycles=args.max_cycles or 10, interval=args.interval or 0.0)
     _emit(out, {"command": "run", "cycles": cycles, **service.last_report()})
     return EXIT_OK
 
