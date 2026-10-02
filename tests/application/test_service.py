@@ -8,6 +8,9 @@ invisible until the parts were wired together and executed.
 
 from __future__ import annotations
 
+import io
+import json
+from dataclasses import replace
 from decimal import Decimal
 from pathlib import Path
 from typing import Any
@@ -21,8 +24,9 @@ from stop_order_scalp.application.service import (
     load_candles_csv,
     synthetic_candles,
 )
-from stop_order_scalp.domain.enums import LifecycleState
+from stop_order_scalp.domain.enums import Environment, LifecycleState
 from stop_order_scalp.infrastructure.config import AppConfig, load_config
+from stop_order_scalp.infrastructure.persistence import StateLedger
 
 
 @pytest.fixture
@@ -48,11 +52,70 @@ def _with_state_in(config: AppConfig, tmp_path: Path) -> AppConfig:
     A dry run writes a real ledger, and a test that writes to ``state/state.json`` is a test
     that fails on a second run and leaves debris behind on the first.
     """
-    from dataclasses import replace
-
-
-    paths = replace(config.paths, state_file=tmp_path / "state.json")
+    paths = replace(config.paths, state_file=tmp_path / "state.json", state_file_is_default=False)
     return replace(config, paths=paths)
+
+
+def _shared_paths(config: AppConfig, tmp_path: Path) -> AppConfig:
+    """A configuration whose ledger both runs in a test will share.
+
+    ``state_file_is_default=False`` on purpose: these tests are about two runs hitting the
+    *same* file, which is what an explicitly configured path gives. The default path is
+    scoped per environment, and is covered separately below.
+    """
+    paths = replace(config.paths, state_file=tmp_path / "state.json", state_file_is_default=False)
+    return replace(config, paths=paths)
+
+
+def _run(config: AppConfig, *, cycles: int) -> Any:
+    """Build and run a service over the deterministic series."""
+    candles = synthetic_candles(120, timeframe="M1")
+    service = build_service(
+        config,
+        dry_run=True,
+        candles=candles,
+        m15_candles=aggregate(candles, "M1", "M15"),
+    )
+    service.run(max_cycles=cycles)
+    return service
+
+
+def _plant_unresolved(state_file: Path) -> None:
+    """Write an intent with no recorded outcome -- the state recovery exists to resolve.
+
+    Hand-written rather than produced by a crashed run, because provoking a real crash
+    between the write and the settle is not something a test should try to do reliably.
+    """
+    from datetime import UTC, datetime
+    from decimal import Decimal as D
+
+    from stop_order_scalp.domain.enums import OrderKind
+    from stop_order_scalp.domain.models import OrderIntent
+    from stop_order_scalp.domain.value_objects import Price, Volume
+    from stop_order_scalp.infrastructure.persistence import LedgerEntry, StateLedger
+
+    intent = OrderIntent(
+        plan_id="planted-plan",
+        client_tag="planted-unresolved-intent",
+        symbol="US30",
+        kind=OrderKind.ORDER_KIND_BUY_STOP,
+        volume=Volume.of(D("0.1")),
+        entry=Price.parse("40000.0", 1),
+        stop_loss=Price.parse("39990.0", 1),
+        take_profit=Price.parse("40100.0", 1),
+        magic_number=1,
+        comment="planted by a test",
+        deviation_points=20,
+        expiration=None,
+    )
+    ledger = StateLedger(state_file)
+    ledger.record(
+        LedgerEntry(
+            client_tag=intent.client_tag,
+            intent=intent,
+            recorded_at=datetime(2026, 1, 1, tzinfo=UTC),
+        )
+    )
 
 
 class TestItRuns:
@@ -319,3 +382,267 @@ class TestOrderExpiry:
 
         record = next(iter(service.broker._orders.values()))
         assert record.state == "FILLED", f"the order ended as {record.state}"
+
+
+class TestAcrossTwoRuns:
+    """What a *second* run sees. The class of bug this file is really about.
+
+    Every test above builds a service and runs it once, in a fresh temporary directory. That
+    is why 1116 tests passed while the restart-recovery path was dead code and the ledger was
+    being overwritten on every run: nothing in the suite ever had two runs share a file.
+
+    The bugs these cover were found by hand, after the suite was green, by running the same
+    command twice. Each test here is that experiment, made permanent.
+    """
+
+    def test_a_second_run_does_not_erase_the_first_runs_ledger(
+        self, config: AppConfig, tmp_path: Path
+    ) -> None:
+        """The first write of run two must not discard run one's records.
+
+        ``flush`` rewrites the whole file from memory. If run two starts from an empty
+        in-memory ledger, it writes an empty file over the top -- and the record whose entire
+        purpose is to prevent a duplicate order is gone.
+
+        Checked with a **sentinel** entry, not by comparing counts. Two earlier versions of
+        this assertion were both vacuous: one compared disk against memory, which agree even
+        when both are wrong, and one compared entry counts, which match because run two
+        re-records the *same* client tag and so replaces run one's row one-for-one. A
+        distinct tag is the only thing that can show the row was dropped.
+        """
+        shared = _shared_paths(config, tmp_path)
+        _run(shared, cycles=8)
+        _plant_unresolved(shared.paths.state_file)
+        sentinel = "planted-unresolved-intent"
+
+        assert StateLedger.load(shared.paths.state_file).get(sentinel) is not None
+
+        second = _run(shared, cycles=8)
+        assert second.lifecycle.ledger.durable, "the shared ledger should be persistent"
+
+        survived = StateLedger.load(shared.paths.state_file)
+        assert survived.get(sentinel) is not None, (
+            "run two's first write discarded a record that was already on disk; the ledger "
+            "that exists to prevent a duplicate order has been deleted by running the program"
+        )
+
+    def test_a_second_run_recovers_rather_than_starting_blind(
+        self, config: AppConfig, tmp_path: Path
+    ) -> None:
+        """An intent left unresolved by run one must be visible to run two.
+
+        This is the whole point of the write-intent ledger: an intent with no recorded outcome
+        may have reached the broker, and only the broker can say. Recovery asks. If run two
+        cannot see run one's entry, the question is never asked and a duplicate is possible.
+        """
+        shared = _shared_paths(config, tmp_path)
+        first = _run(shared, cycles=8)
+
+        # Simulate a crash between the write and the outcome being recorded, which is the
+        # exact window the ledger exists to cover.
+        for entry in list(first.lifecycle.ledger.entries()):
+            first.lifecycle.ledger.forget(entry.client_tag)
+            break
+        _plant_unresolved(shared.paths.state_file)
+
+        second = _run(shared, cycles=4)
+
+        assert len(second.lifecycle.ledger.awaiting_confirmation()) == 1, (
+            "run two could not see the unresolved intent run one left behind"
+        )
+
+    def test_a_dry_run_and_a_live_run_never_share_a_ledger(
+        self, config: AppConfig, tmp_path: Path
+    ) -> None:
+        """A simulated venue's records are not claims about a real venue.
+
+        With one shared file, a dry run's synthetic intent makes ``was_sent`` answer *yes*
+        for a real run over the same candles, and the live run refuses to place an order it
+        never sent. The system becomes unable to trade, silently.
+        """
+        resolved = {
+            environment: config.paths.state_file_for(environment) for environment in Environment
+        }
+
+        assert resolved[Environment.DRY_RUN] != resolved[Environment.LIVE]
+        assert resolved[Environment.DRY_RUN] != resolved[Environment.PAPER]
+        assert resolved[Environment.LIVE] != resolved[Environment.PAPER]
+
+    def test_a_dry_run_is_repeatable(self, config: AppConfig, tmp_path: Path) -> None:
+        """Running the identical command twice must give the identical answer.
+
+        This is the property a dry run exists to have. It comes from the ledger being scoped
+        per environment: with one shared file the second invocation found its own first
+        invocation's entries and reported ``already_recorded`` instead of ``placed``.
+
+        The point of the test is the *default* path resolution, so it deliberately does not
+        override ``state_file`` -- doing so is what made an earlier version of this test pass
+        a shared ledger and then fail to describe anything real.
+        """
+        scoped = replace(config.paths, state_file_is_default=True)
+        paths = replace(
+            scoped,
+            state_file=tmp_path / "state.json",  # same name, but flagged as the default
+        )
+        first_config = replace(config, paths=paths)
+        assert paths.state_file_for(Environment.DRY_RUN).name == "state-dry_run.json"
+
+        first = _run(first_config, cycles=8)
+        second = _run(first_config, cycles=8)
+
+        assert [c.action for c in first.cycles] == [c.action for c in second.cycles], (
+            "two identical dry runs disagreed"
+        )
+        actions = [cycle.action for cycle in second.cycles]
+        assert "already_recorded" not in actions, (
+            f"a fresh dry run was blocked by its own previous entries: {actions}"
+        )
+        assert "placed" in actions, f"the repeat run placed nothing: {actions}"
+
+    def test_an_explicitly_shared_ledger_still_blocks_a_duplicate(
+        self, config: AppConfig, tmp_path: Path
+    ) -> None:
+        """The other half of the same coin: when two runs *do* share a file, the guard fires.
+
+        A dry run is repeatable because it gets its own file, not because the duplicate check
+        was weakened. Point two runs at one ledger and the second must decline to re-send an
+        identity the first already recorded -- that is the whole reason the ledger exists.
+        """
+        shared = _shared_paths(config, tmp_path)
+        _run(shared, cycles=8)
+        second = _run(shared, cycles=8)
+
+        actions = [cycle.action for cycle in second.cycles]
+        assert "already_recorded" in actions, (
+            f"a shared ledger failed to block a repeat send: {actions}"
+        )
+
+    def test_an_explicit_state_file_is_used_verbatim(
+        self, config: AppConfig, tmp_path: Path
+    ) -> None:
+        """A path the operator chose is a path they meant exactly. No suffixing.
+
+        Only the *default* is scoped per environment. Suffixing a configured path would mean
+        the ledger the operator pointed at is quietly not the one that gets written.
+        """
+        chosen = tmp_path / "my-ledger.json"
+        paths = replace(config.paths, state_file=chosen, state_file_is_default=False)
+
+        for environment in Environment:
+            assert paths.state_file_for(environment) == chosen
+
+    def test_asking_the_journal_does_not_erase_the_journal(
+        self, config: AppConfig, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        """Reading the ledger must not write to it.
+
+        ``journal`` used to construct the ledger rather than load it, and the context manager
+        flushes on exit -- so simply asking what had happened replaced the file with an empty
+        one. The worst possible failure for a record kept for exactly this reason.
+        """
+        shared = _shared_paths(config, tmp_path)
+        _run(shared, cycles=8)
+        before = StateLedger.load(shared.paths.state_file)
+        assert len(before) > 0, "nothing to lose"
+
+        # Called with *this test's* config rather than through argv: the CLI re-reads the
+        # project config from disk, and an earlier version of this test passed a `--config`
+        # flag that does not exist, so the command read a different ledger than the one the
+        # test had populated and passed against the bug it was written for.
+        import argparse
+
+        from stop_order_scalp.cli import main as cli_main
+
+        captured = io.StringIO()
+        exit_code = cli_main._cmd_journal(  # the unit under test, hence the private name
+            argparse.Namespace(limit=None), shared, captured, io.StringIO()
+        )
+        capsys.readouterr()
+
+        assert exit_code == 0
+        assert json.loads(captured.getvalue())["count"] > 0, "the journal read nothing"
+
+        after = StateLedger.load(shared.paths.state_file)
+        assert len(after) == len(before), (
+            f"reading the journal changed the ledger from {len(before)} to {len(after)} entries"
+        )
+
+    def test_the_default_ledger_is_scoped_per_environment(
+        self, config: AppConfig
+    ) -> None:
+        paths = replace(config.paths, state_file_is_default=True)
+        resolved = {env: paths.state_file_for(env) for env in Environment}
+
+        assert len(set(resolved.values())) == len(Environment)
+        assert resolved[Environment.LIVE].name == "state.json", (
+            "the live ledger should keep the name an operator will look for"
+        )
+        assert resolved[Environment.DRY_RUN].name == "state-dry_run.json"
+
+
+class TestWhatTheReportClaims:
+    def test_the_action_label_and_its_detail_come_from_one_source(
+        self, config: AppConfig, tmp_path: Path
+    ) -> None:
+        """A cycle labelled `hold` must be described by the `hold` branch.
+
+        The report used to synthesise ``"hold"`` when a step carried no actions, while
+        ``_describe`` read that same emptiness as ``""`` and fell through to the plan. So a
+        line could read "hold" beside "planned 0.4 lots at 40006.3" while the venue held an
+        order at 40005.7. Two places deciding what "no action" means is how it happened.
+        """
+        service = _run(_shared_paths(config, tmp_path), cycles=8)
+
+        for cycle in service.cycles:
+            if cycle.action != "hold":
+                continue
+            assert not cycle.detail.startswith("planned "), (
+                f"cycle {cycle.index} is labelled 'hold' but describes a plan: "
+                f"{cycle.detail!r}"
+            )
+
+    def test_a_hold_names_the_resting_order_not_the_plan(
+        self, config: AppConfig, tmp_path: Path
+    ) -> None:
+        """A cycle that placed nothing must name what the venue holds, not a fresh plan.
+
+        The reader sees "planned 0.4 lots at 40006.3" beside a venue holding an order placed
+        at 40005.7, and reasonably concludes there are two orders. There is one.
+
+        No ``continue`` guard here. An earlier version skipped any detail it did not
+        recognise, which meant that with the bug present -- every detail reading "planned" --
+        the loop body never ran and the test passed. A guard that skips the failing case is
+        worse than no assertion.
+        """
+        service = _run(_shared_paths(config, tmp_path), cycles=8)
+        holds = [cycle for cycle in service.cycles if cycle.action == "hold"]
+        assert holds, "expected at least one hold cycle after a placement"
+
+        resting = {
+            str(record.entry) for record in service.broker.orders()
+        } | {str(position.entry) for position in service.broker.positions()}
+        assert resting, "expected the venue to be holding something during a hold"
+
+        for cycle in holds:
+            assert not cycle.detail.startswith("planned "), (
+                f"cycle {cycle.index} is a hold but quotes a plan nobody is working: "
+                f"{cycle.detail!r}"
+            )
+            assert any(entry in cycle.detail for entry in resting), (
+                f"cycle {cycle.index} reported {cycle.detail!r}, which names none of the "
+                f"entries the venue actually holds ({sorted(resting)})"
+            )
+
+    def test_a_placed_cycle_reports_the_brokers_numbers(
+        self, config: AppConfig, tmp_path: Path
+    ) -> None:
+        service = _run(_shared_paths(config, tmp_path), cycles=8)
+        placed = [cycle for cycle in service.cycles if cycle.action == "placed"]
+        assert placed, "expected a placement"
+
+        cycle = placed[0]
+        record = next(iter(service.broker._orders.values()))
+        for value in (record.ticket, str(record.entry), str(record.stop_loss)):
+            assert str(value) in cycle.detail, (
+                f"the placement line {cycle.detail!r} does not carry {value!r} from the venue"
+            )

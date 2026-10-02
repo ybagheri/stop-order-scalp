@@ -28,17 +28,53 @@ Each cycle reports what it decided, in order:
 | `trailed` | the stop moved to follow price; the detail is read back from the broker |
 | `break_even_armed` | price moved far enough in favour; the stop went to entry |
 | `no_trade` | the strategy declined, and the detail says **why** in its own words |
-| `hold` | nothing to do; a resting order or an open position is being managed |
+| `hold` | nothing was sent; the detail says what the venue is already holding |
 
 A real excerpt from the synthetic series:
 
 ```
-  1 00:15 placed   placed BUY_STOP ticket 1 at 40005.7 sl 39995.7 tp 40105.7
-  6 00:20 trailed  trailed: stop now 39996.0, entry 40005.7, BUY 0.4 lots
- 22 00:36 break_even_armed  break_even: stop now 40005.7, entry 40005.7
+  1 placed  waiting_for_trigger  placed BUY_STOP ticket 1 at 40005.7 sl 39995.7 tp 40105.7
+  2 hold    waiting_for_trigger  order already resting: BUY_STOP ticket 1 at 40005.7
+  5 hold    position_open        holding BUY 0.4 lots, entry 40005.7, stop 39995.7
+  6 trailed trailing             trailed: stop now 39996.0, entry 40005.7, BUY 0.4 lots
 ```
 
+Every number on a line is the venue's, not the plan's. A `hold` names the order or position
+that already exists rather than the trade that was considered and declined — otherwise the
+reader sees "planned 0.4 lots at 40006.3" next to an order resting at 40005.7 and concludes
+there are two.
+
 The summary at the end carries the balance, the open positions and the final state.
+
+## Repeating a run
+
+Running the identical command twice gives the identical answer. That is deliberate, and it is
+why a default dry run **writes no state at all**:
+
+```
+$ python -m stop_order_scalp run --dry-run --max-cycles 5   # placed, hold, hold, hold, hold
+$ python -m stop_order_scalp run --dry-run --max-cycles 5   # placed, hold, hold, hold, hold
+```
+
+The simulated venue is built fresh on every run and remembers nothing, so a durable ledger
+beside it would be a lie — it would claim an order had reached a venue that has never heard
+of it, and the duplicate guard would then refuse a legitimate placement on the second run.
+The ledger's value is that it and the venue agree on what was sent, so their lifetimes have
+to match.
+
+To persist a dry run's intents anyway, set an explicit path in `config/default.yaml`:
+
+```yaml
+state:
+  path: state/dry-run.json
+```
+
+An explicit path is honoured verbatim and *is* persisted, which is also how restart recovery
+gets exercised: two runs pointed at one file share it, and the second declines to re-send an
+identity the first already recorded. `journal` reads that file.
+
+`state/state.json` is the **LIVE** ledger. It is never written by a dry run, and it is the
+one file that must not appear as a side effect of testing something.
 
 ## What a dry run does **not** tell you
 
@@ -98,3 +134,21 @@ ignored is the most expensive kind of configuration bug there is.
 `LIVE` needs three independent switches — `SOS_ENVIRONMENT=LIVE`, `SOS_ALLOW_LIVE=true` and
 `SOS_ALLOW_ORDER=true` — and that is not decoration. It is a belt-and-braces refusal for a
 system whose broker behaviour has not been observed once.
+
+## If a run is interrupted
+
+Nothing needs cleaning up. A default dry run keeps its ledger in memory, so an interrupted
+run leaves no file behind — which is the correct outcome, because a simulated position that
+no longer exists must not be recoverable.
+
+A run against a persistent ledger is the case that matters. The intent is written **before**
+the send, so an interrupted run leaves an entry with no recorded outcome. That is not an
+error state to be cleaned up; it is the question the next run exists to ask the broker:
+
+```
+$ python -m stop_order_scalp journal
+```
+
+If the process died between the write and the send, the broker has no such order and the
+entry is retired. If it died after the send, the broker has it and the entry is adopted. The
+system never assumes the first, because assuming it is how a duplicate order is created.

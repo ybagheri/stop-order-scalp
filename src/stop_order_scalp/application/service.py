@@ -275,7 +275,7 @@ class TradingService:
                 index=index,
                 moment=reference,
                 state=str(self.lifecycle.state),
-                action=step.actions[0] if step.actions else "hold",
+                action=_action_of(step),
                 detail=_describe(step, self, reason),
                 price=str(window_m1[-1].close),
                 placed="placed" in step.actions,
@@ -376,7 +376,34 @@ def build_service(
     position_manager = PositionManager(
         config.strategy.break_even, config.strategy.trailing
     )
-    ledger = StateLedger(config.paths.state_file)
+    # **Load, never construct.** The constructor takes a path and starts empty; only
+    # `load` reads it. Constructing here would hand recovery a blank ledger, so
+    # `recover()` would find nothing to verify, and the first `record` would flush an
+    # empty file over the top of every intent already on disk -- silently deleting the
+    # record whose entire purpose is to stop a duplicate order. Every Phase 7 test passed
+    # because each built its own ledger; only a real second run shares the file.
+    #
+    # **A dry run's ledger is not persisted by default, and that is not a shortcut.**
+    #
+    # `SimulatedBroker` is constructed fresh on the line above and has no memory of any
+    # previous run. A durable ledger beside it would be a lie: it would claim "this identity
+    # reached a venue" about a venue that has never heard of it, and the duplicate guard would
+    # then refuse a legitimate placement on the second run of an identical command. The
+    # ledger's whole value is that it and the venue agree on what was sent, so the ledger's
+    # lifetime must be the venue's lifetime -- which is also what makes a dry run
+    # reproducible.
+    #
+    # **Unless the operator named a file.** An explicit `state_file` is a deliberate request
+    # for that ledger to be used, and it is how restart recovery gets exercised at all: two
+    # runs pointed at one path must share it, or there is nothing to recover. Overriding the
+    # default is exactly the operator saying "I want this persisted".
+    #
+    # Every rule still applies either way -- record before send, refuse a repeated tag,
+    # settle once. Only durability changes.
+    if settings.environment is Environment.DRY_RUN and config.paths.state_file_is_default:
+        ledger: StateLedger = StateLedger.in_memory()
+    else:
+        ledger = StateLedger.load(config.paths.state_file_for(settings.environment))
 
     lifecycle = TradeLifecycle(
         broker,
@@ -421,6 +448,21 @@ def _reason(decision: Any) -> str:
     return f"{reason}: {detail}" if detail else str(reason)
 
 
+def _action_of(step: Any) -> str:
+    """This cycle's action, with one definition of "nothing happened".
+
+    Previously the report synthesised ``"hold"`` when a step carried no actions while
+    ``_describe`` read the same emptiness as ``""``. So the report labelled a cycle ``hold``
+    and described it from a branch that a ``hold`` never reached -- which is why a line could
+    read "hold" beside "planned 0.4 lots at 40006.3" while the venue held an order at
+    40005.7. Two places deciding what "no action" means is how that happened.
+
+    Now there is one function, and both the label and the description come from it.
+    """
+    actions = getattr(step, "actions", ()) or ()
+    return str(actions[0]) if actions else "hold"
+
+
 def _describe(step: Any, service: TradingService, fallback: str) -> str:
     """What actually happened this cycle, in one line.
 
@@ -429,7 +471,7 @@ def _describe(step: Any, service: TradingService, fallback: str) -> str:
     "planned 0.4 lots at 40007.2" beside a stop that moved to 40011.7 and leaves the reader
     guessing which number the action refers to. The venue's own state has no such ambiguity.
     """
-    action = (getattr(step, "actions", ()) or ("",))[0]
+    action = _action_of(step)
     if action in ("trailed", "break_even_armed"):
         positions = service.broker.positions()
         if positions:
@@ -446,11 +488,40 @@ def _describe(step: Any, service: TradingService, fallback: str) -> str:
                 f"placed {record.kind} ticket {record.ticket} at {record.entry} "
                 f"sl {record.stop_loss} tp {record.take_profit}"
             )
+    if action == "hold":
+        # A `hold` means the strategy wanted to trade and the lifecycle declined to send,
+        # usually because something is already resting or open. Reporting the *plan* here
+        # is the same plan-versus-reality confusion as above, one level down: the reader
+        # sees "planned 0.4 lots at 40006.3" while the venue is holding an order placed at
+        # 40005.7, and reasonably concludes there are two orders. Name what the venue holds.
+        return _describe_resting(service) or fallback
     notes = getattr(step, "notes", ())
     if notes:
         first: str = str(notes[0])
         return first
     return fallback
+
+
+def _describe_resting(service: TradingService) -> str:
+    """What the venue is actually holding, for a cycle that placed nothing.
+
+    A position first: if one is open, that is what the reader needs to know, and the stop
+    beside it is the number that matters.
+    """
+    positions = service.broker.positions()
+    if positions:
+        position = positions[0]
+        return (
+            f"holding {position.side} {position.volume.lots} lots, entry {position.entry}, "
+            f"stop {position.stop_loss}"
+        )
+    orders = service.broker.orders()
+    if orders:
+        resting = ", ".join(
+            f"{record.kind} ticket {record.ticket} at {record.entry}" for record in orders
+        )
+        return f"order already resting: {resting}"
+    return ""
 
 
 class LiveTradingUnavailable(RuntimeError):
@@ -575,8 +646,20 @@ def synthetic_candles(
     trend lets a real order be placed, so the run exercises the whole path including risk,
     the gate and the ledger.
 
-    The shape alternates: 30 bars up, 15 across, 30 down, 15 across, so a run long enough
-    crosses into a downtrend and places a SELL as well as a BUY.
+    The shape is **40 bars gently up, then 5 gently down, repeating**. Both numbers are
+    load-bearing, and the docstring used to describe a different series than the code built,
+    which is its own small warning:
+
+    * **Up first, and for 40 bars.** The first decision happens at the 15-minute mark, so a
+      pullback before then would leave a BUY STOP resting above the market that price never
+      reached, and the run would end with a correct order and nothing else to show.
+    * **Never longer than the entry offset.** Five down bars is a shallow retracement, so the
+      5-bar M1 high always stays below the resting stop. A deeper one would fill the order
+      immediately and the run would never reach the trailing logic that is the point of
+      exercising it.
+
+    A 120-bar run therefore contains both a BUY and a SELL, so a long enough run shows the
+    system working in both directions rather than only the convenient one.
     """
     origin = start or datetime(2026, 3, 12, 0, 0, tzinfo=UTC)
     seconds = period_seconds(timeframe)

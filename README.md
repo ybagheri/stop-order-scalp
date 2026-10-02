@@ -10,7 +10,7 @@
 > **Phases 1–7 complete, and it runs.** The domain layer, configuration, logging, the
 > MetaTrader 5 feed, the closed-candle freeze, the M15/M1 baseline decision, the position
 > sizer, the idempotent order manager, the monotonic trailing stop and the write-intent
-> lifecycle are implemented, **wired together**, and tested — **1116 tests, no broker
+> lifecycle are implemented, **wired together**, and tested — **1127 tests, no broker
 > required**. `run --dry-run` executes the whole pipeline against a simulated venue and
 > prints what it did on every cycle. Of the seven CLI commands, `validate-config`,
 > `test-connection`, `run` and `journal` work; the rest exit **4** and say which phase has
@@ -72,9 +72,12 @@ python -m venv .venv
 pip install -e ".[dev]"
 cp .env.example .env        # Windows: copy .env.example .env
 python -m stop_order_scalp validate-config
-python -m stop_order_scalp test-connection
-python -m stop_order_scalp run --dry-run
+python -m stop_order_scalp run --dry-run --max-cycles 30
 ```
+
+Read [`docs/operations/RUNNING.md`](docs/operations/RUNNING.md) for how to interpret that
+output. Repeating the identical command gives the identical result — see
+[Repeating a run](docs/operations/RUNNING.md#repeating-a-run) for why that needed fixing.
 
 ## CLI
 

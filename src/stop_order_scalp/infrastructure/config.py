@@ -52,6 +52,7 @@ from stop_order_scalp.domain.models import (
 __all__ = [
     "CONFIG_ENV_PREFIX",
     "DEFAULT_CONFIG_RELATIVE",
+    "DEFAULT_STATE_RELATIVE",
     "AppConfig",
     "BreakEvenSettings",
     "EntrySettings",
@@ -75,6 +76,12 @@ CONFIG_ENV_PREFIX: Final[str] = "SOS_"
 
 #: The strategy defaults shipped with the repository.
 DEFAULT_CONFIG_RELATIVE: Final[str] = "config/default.yaml"
+
+#: Where the write-intent ledger lives unless an operator points it elsewhere. Named because
+#: :meth:`ProjectPaths.state_file_for` has to recognise it to tell the project's own default
+#: apart from a deliberate override, and because the string appears in two places that must
+#: not drift apart.
+DEFAULT_STATE_RELATIVE: Final[str] = "state/state.json"
 
 #: Environment variables that hold credentials. Their values are read exactly once, at
 #: configuration load, and reduced immediately to a presence flag. Nothing else in the
@@ -117,6 +124,10 @@ class ProjectPaths:
     config_file: Path
     state_file: Path
     log_directory: Path
+    #: Whether ``state_file`` came from configuration rather than from the default. Tracked
+    #: because :meth:`state_file_for` must only suffix the *default*: a path an operator chose
+    #: deliberately is a path they meant exactly.
+    state_file_is_default: bool = True
 
     @classmethod
     def resolve(
@@ -131,8 +142,49 @@ class ProjectPaths:
         return cls(
             root=base,
             config_file=_resolve(base, config_file, DEFAULT_CONFIG_RELATIVE),
-            state_file=_resolve(base, state_file, "state/state.json"),
+            state_file=_resolve(base, state_file, DEFAULT_STATE_RELATIVE),
             log_directory=_resolve(base, log_directory, "logs"),
+            state_file_is_default=state_file is None,
+        )
+
+    def state_file_for(self, environment: Environment) -> Path:
+        """The write-intent ledger **for one environment**, never shared between two.
+
+        The ledger is the record that stops a duplicate order, and an entry in it is a claim
+        about a *specific venue*: "this identity was sent to this broker". A simulated venue
+        and a real one are different venues, so a shared file would let one make statements
+        about the other.
+
+        Concretely, with one shared file a dry run's synthetic intent would answer
+        ``was_sent() == True`` for a real run over the same candles, and the live run would
+        refuse to place an order it had never sent. The system would be unable to trade, and
+        nothing would say why. The second symptom is a dry run that is not repeatable: the
+        second invocation of an identical command finds its own first invocation's entries and
+        reports ``already_recorded``.
+
+        So the environment is part of the path. ``DRY_RUN`` gets ``state-dry_run.json`` and
+        ``PAPER`` gets ``state-paper.json``; ``LIVE`` keeps the unsuffixed
+        ``state/state.json`` -- unsuffixed because it is the one an operator will look for,
+        and because a live ledger must never be created as a side effect of testing
+        something.
+
+        The suffix is lowercased. ``state-DRY_RUN.json`` is a valid filename and an annoying
+        one to type on a case-insensitive filesystem where ``state-dry_run.json`` and
+        ``state-DRY_RUN.json`` are the same file.
+
+        An explicit ``state_file`` from configuration is still honoured, and still wins. An
+        operator who has deliberately pointed the project at one ledger gets one ledger; the
+        suffixing only applies to the default.
+        """
+        if not self.state_file_is_default:
+            return self.state_file
+        if environment is Environment.LIVE:
+            # LIVE keeps the configured name. It is the ledger an operator goes looking for
+            # after something goes wrong, and it is the one file that must never appear as a
+            # side effect of running a test -- so it is only ever created deliberately.
+            return self.state_file
+        return self.state_file.with_name(
+            f"{self.state_file.stem}-{environment.value.lower()}{self.state_file.suffix}"
         )
 
 
@@ -693,6 +745,18 @@ def load_config(
         state_file=state_settings.path,
         log_directory=logging_settings.directory,
     )
+    # The shipped `config/default.yaml` states `state.path`, so asking "was this configured?"
+    # by testing `state_settings.path is not None` would classify the project's own default
+    # as a deliberate operator override -- and then no ledger would ever be scoped, which is
+    # the bug this flag exists to prevent. So the question is asked against the value the
+    # project ships with, not against None.
+    if state_settings.path is not None:
+        paths = replace(
+            paths,
+            state_file_is_default=(
+                Path(state_settings.path).as_posix() == DEFAULT_STATE_RELATIVE
+            ),
+        )
 
     environment = _build_environment(
         layer, default_magic=int((raw.get("execution") or {}).get("magic_number", 20260930))

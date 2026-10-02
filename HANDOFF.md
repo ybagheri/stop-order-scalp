@@ -10,10 +10,91 @@
 
 ## Current Phase
 
-**Phase 9 — Make It Run — COMPLETE and green. `run --dry-run` works.**
+**Phase 9 — Make It Run — COMPLETE and green. `run --dry-run` works, repeatably.**
 
 Next phase to execute: **Phase 10 — Backtest and Statistics** (only after a human has looked
 at the dry run's output).
+
+## Read this before Phase 10
+
+The idempotency guarantee was broken for the whole of Phase 9, and 1116 tests passed while it
+was broken. Both facts matter more than the bugs themselves.
+
+**What went wrong.** `build_service` built the ledger with `StateLedger(path)` — the
+constructor — instead of `StateLedger.load(path)`. The constructor takes a path and starts
+empty; it never reads the file. So `recover()` was handed a blank ledger on every run, and
+the first `record` flushed an empty file over every intent already on disk. Phase 7's entire
+restart-recovery path was dead code in the only place that called it.
+
+**Why the suite missed it.** Every Phase 7 and Phase 9 test built its own ledger in a fresh
+temporary directory and ran once. Nothing in 1116 tests ever had two runs share a file. The
+defect is invisible in isolation and obvious in sequence, and the suite only ever tested one
+run.
+
+**The rule that follows.** A test that exercises state must exercise it *twice*, against the
+same file. `TestAcrossTwoRuns` exists for this and is the first thing to extend in Phase 10.
+
+### The ledger's lifetime must match the venue's lifetime
+
+The fix raised a second question the first one hid. A dry run's ledger is now **in memory by
+default**, and that is not a shortcut past durability.
+
+`SimulatedBroker` is constructed fresh on every run and remembers nothing. A durable ledger
+beside it would claim "this identity reached a venue" about a venue that has never heard of
+it, and `was_sent()` would then answer *yes* for an order the live run never sent — the
+system would refuse to trade, silently. Three identical dry runs in a row also became
+non-repeatable, which is the one property a dry run most needs.
+
+So: `DRY_RUN` gets an in-memory ledger, and the environment is otherwise part of the path
+(`state-dry_run.json`, `state-paper.json`, `state.json` for `LIVE`). An **explicitly
+configured** `state.path` is honoured verbatim and *is* persisted, because that is how restart
+recovery gets exercised at all — two runs pointed at one file must share it.
+
+Every rule still applies to an in-memory ledger: record before send, refuse a repeated tag,
+settle once. Only `flush` stops writing.
+
+### `journal` could delete the journal
+
+`_cmd_journal` had the same construct-instead-of-load defect, and the context manager flushes
+on exit. So *asking what had happened* replaced the file with an empty one. It now loads, and
+reports which ledger it read — `state/state.json` is the LIVE ledger, so a journal that
+silently showed nothing would read as "no trades" rather than "wrong file".
+
+### `config/default.yaml` stating the default is still the default
+
+`state.path` is written in the shipped YAML, so "was this configured?" could not be answered
+with `path is not None` — that classified the project's own default as an operator override
+and left every ledger unscoped. It is now compared against `DEFAULT_STATE_RELATIVE`. A test
+caught this one: the first version of the fix passed every unit test and did nothing in
+practice.
+
+### Four regression tests that could not fail
+
+Written after the fixes, then checked by reverting each fix and re-running its test. Three of
+the first four passed against the bugs they were written for:
+
+* Compared the on-disk ledger to the in-memory one. Those agree even when both are wrong.
+* Compared entry *counts* between two runs. They match, because run two re-records the same
+  client tag and replaces run one's row one-for-one. Only a **distinct sentinel tag** shows
+  the row was dropped.
+* Skipped any detail it did not recognise with `if not ...: continue` — so with the bug
+  present, every detail was skipped and the loop body never ran. A guard that skips the
+  failing case is worse than no assertion.
+* Passed a `--config` flag the CLI does not have, so the command read a different ledger than
+  the test had populated.
+
+All eight are now verified to fail with their fix reverted. **Re-run that check after writing
+any new regression test** — it is the only thing that distinguishes a test from a comment.
+
+### The report, again
+
+`_action_of` now exists because two places decided what "no action" means: the report
+synthesised `"hold"` while `_describe` read the same emptiness as `""`, so a line could read
+`hold` beside `planned 0.4 lots at 40006.3` while the venue held an order at 40005.7. A
+`hold` now names the resting order or open position.
+
+`synthetic_candles`' docstring also described a 30/15/30/15 series the code did not build. It
+builds 40 up / 5 down, and both numbers are load-bearing — the docstring now says why.
 
 ## Phase 8 — Al Brooks Integration: removed
 
@@ -36,6 +117,17 @@ over frozen settings, so another source could be added later without touching an
 5. **The replay must not gain a forming-bar concept.** `freeze_closed_bars` decides what is
    closed. A backtest that hand-feeds a bar the strategy would not have seen is a look-ahead
    bug shaped like a good result.
+6. **A backtest is a second run, so it inherits every bug above.** A replay over a CSV is
+   exactly the shape that hid the construct-instead-of-load defect: one run, one fresh
+   directory, nothing shared. Test the replay **twice against the same state**, and check
+   that a second replay of identical data gives an identical result rather than
+   `already_recorded`.
+7. **Statistics must be computed from the venue's own records**, not from the plans. The
+   report already reads entry, stop and size back from the broker because quoting the plan
+   beside the action is how a reader ends up with two different prices for one order. A
+   profit figure derived from intended levels is that mistake with more decimal places.
+8. **The synthetic series is not evidence.** It exists to prove the wiring. A backtest that
+   reports a number without saying which file it came from will be quoted as a result.
 
 ## Phase 9 — Make It Run — COMPLETE
 
@@ -422,7 +514,7 @@ tests/conftest.py, tests/unit/*.py            annotations, hermetic .env
 
 ## Tests
 
-1116 passing, 1 skipped.
+1127 passing, 1 skipped.
 
 | File | Tests |
 | --- | --- |
@@ -470,7 +562,7 @@ integration that was removed in Phase 8.
 ## Test Results
 
 ```
-python -m pytest                             1116 passed, 1 skipped
+python -m pytest                             1127 passed, 1 skipped
 python -m ruff check .                       All checks passed!
 python -m mypy                               Success: no issues found in 95 source files
 python scripts/check_architecture.py         architecture OK: 51 modules checked

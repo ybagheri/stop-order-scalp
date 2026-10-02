@@ -296,9 +296,31 @@ def _cmd_run(args: argparse.Namespace, config: AppConfig, out: TextIO, err: Text
 def _cmd_journal(args: argparse.Namespace, config: AppConfig, out: TextIO, err: TextIO) -> int:
     ledger_type = _resolve("stop_order_scalp.infrastructure.persistence", "JsonStateLedger")
 
-    with ledger_type(config.paths.state_file) as ledger:
+    # **Load, never construct** -- the same rule the trading path follows. Constructing here
+    # would start from an empty ledger and then `__exit__` would flush that empty ledger over
+    # the real file, so merely *asking what happened* would erase the record of what happened.
+    #
+    # **Scoped to the environment**, and the path is reported. `state/state.json` is the LIVE
+    # ledger; a dry run's intents are not in it, and a journal that silently showed nothing
+    # would read as "no trades" rather than as "you are looking at the wrong file".
+    environment = _resolve("stop_order_scalp.domain.enums", "Environment")
+    state_path = config.paths.state_file_for(environment.DRY_RUN)
+    with ledger_type.load(state_path) as ledger:
         entries = ledger.journal(limit=config.state.journal_limit)
-        _emit(out, {"count": len(entries), "entries": entries})
+        _emit(
+            out,
+            {
+                "ledger": str(state_path),
+                "exists": state_path.exists(),
+                "count": len(entries),
+                "entries": entries,
+                "note": (
+                    "A default dry run keeps its ledger in memory and writes nothing, so this "
+                    "is empty by design. Point state.path in config/default.yaml at a file to "
+                    "persist a dry run's intents, or read the LIVE ledger at state/state.json."
+                ),
+            },
+        )
     return EXIT_OK
 
 

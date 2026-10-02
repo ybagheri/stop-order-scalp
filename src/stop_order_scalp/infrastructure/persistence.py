@@ -242,11 +242,12 @@ class StateLedger:
     __slots__ = ("_entries", "_path")
 
     def __init__(self, path: Path, entries: dict[str, LedgerEntry] | None = None) -> None:
-        self._path = path
+        self._path: Path | None = path
         self._entries: dict[str, LedgerEntry] = dict(entries or {})
 
     @property
-    def path(self) -> Path:
+    def path(self) -> Path | None:
+        """Where this ledger is written, or ``None`` when it is in memory."""
         return self._path
 
     def __len__(self) -> int:
@@ -374,8 +375,12 @@ class StateLedger:
             del self._entries[client_tag]
             self.flush()
 
+    # --- durability ------------------------------------------------------
+
     def flush(self) -> None:
-        """Write the whole ledger atomically."""
+        """Write the whole ledger atomically. A no-op for an in-memory ledger."""
+        if self._path is None:
+            return
         atomic_write_json(
             self._path,
             {
@@ -383,6 +388,33 @@ class StateLedger:
                 "entries": [entry.to_dict() for entry in self.entries()],
             },
         )
+
+    @classmethod
+    def in_memory(cls) -> StateLedger:
+        """A ledger that keeps every rule except surviving the process.
+
+        For a venue that does not outlive the run. A dry run builds a fresh
+        ``SimulatedBroker`` every time, so a durable ledger beside it would claim that
+        identities reached a venue that has no record of them -- and the duplicate guard
+        would then refuse a legitimate placement on the second run of an identical command.
+
+        The ledger's value is that it and the venue agree on what was sent, so their
+        lifetimes have to match. Everything else still holds: record before send, refuse a
+        repeated tag, settle once. Only :meth:`flush` stops writing.
+
+        Restart recovery is a property of a venue that outlives the process, so it is proven
+        against a persistent ledger in the application tests and against a real terminal in
+        Phase 11 -- not here, where there is nothing to restart.
+        """
+        ledger = cls.__new__(cls)
+        ledger._path = None
+        ledger._entries = {}
+        return ledger
+
+    @property
+    def durable(self) -> bool:
+        """Whether this ledger is written to disk. False only for :meth:`in_memory`."""
+        return self._path is not None
 
     # --- loading ---------------------------------------------------------
 
