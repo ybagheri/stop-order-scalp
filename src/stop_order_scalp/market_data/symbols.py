@@ -91,6 +91,8 @@ class MeasuredUS30:
         }
 
 
+
+
 #: As read from Alpari MT5. Superseded for A Markets -- see the table above.
 MEASURED = MeasuredUS30(
     point=Decimal("0.1"),
@@ -125,10 +127,26 @@ MEASURED_DOWJONES30 = MeasuredUS30(
     digits=0,
 )
 
+
+MEASURED_BITCOIN = MeasuredUS30(
+    point=Decimal("0.01"),
+    tick_size=Decimal("0.01"),
+    tick_value=Decimal("0.01"),
+    contract_size=Decimal("1.0"),
+    volume_min=Decimal("0.01"),
+    volume_max=Decimal("300.0"),
+    volume_step=Decimal("0.01"),
+    stops_level=0,
+    freeze_level=0,
+    digits=2,
+)
+
+
 #: Keyed by the broker's own symbol name, because that is the identity the venue uses.
 MEASURED_BY_SYMBOL: dict[str, MeasuredUS30] = {
     "US30": MEASURED,
     "DowJones30": MEASURED_DOWJONES30,
+    "BITCOIN": MEASURED_BITCOIN
 }
 
 
