@@ -20,8 +20,10 @@ specification requires the three figures to be distinguishable:
 ===================  =========================================================
 
 Sizing on ``price_risk`` alone would over-size every position by the cost of the
-commission. On the numbers in ``docs/mt5/SYMBOL_SPECIFICATIONS.md`` §2 that is 6 % --
-small, systematic, and invisible unless the arithmetic is written out.
+commission. On the **measured** Alpari US30 numbers (``docs/mt5/MEASURED_US30.json``: a
+100-point stop is ``$10`` per lot) a ``$6`` round trip is **60 %** of the price risk -- not the
+6 % it was when the tick value was assumed to be 1.0. Large, systematic, and invisible unless
+the arithmetic is written out. ``backtest`` prints it on every run.
 """
 
 from __future__ import annotations

@@ -53,6 +53,10 @@ entry:
   # Drop a pending order after this many M1 candles without a fill. null = never expire.
   # Baseline is null: the specification says a stale order is re-evaluated, not aged out.
   expiry_candles: null
+  # Replace or cancel a resting pending order when a fresh decision no longer supports it
+  # (new M1 candle -> new price; direction flipped or doji -> cancel). false keeps the legacy
+  # behaviour in which the first order stays on the book until price happens to cross it.
+  refresh_pending: false
 
 risk:
   # percent_balance -- size from a percentage of account balance (BASELINE)

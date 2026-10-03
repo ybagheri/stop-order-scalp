@@ -402,6 +402,7 @@ def build_service(
         position_manager=position_manager,
         magic_number=config.execution.magic_number,
         symbol=symbol,
+        refresh_pending=config.strategy.entry.refresh_pending,
     )
     lifecycle.recover()
 

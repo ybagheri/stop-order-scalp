@@ -9,6 +9,44 @@ project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Review fixes — backtest realism and the stale pending order
+
+#### Fixed
+
+- **A resting pending order was never refreshed.** `docs/execution/EXECUTION.md` §3 says a new
+  candle's tag "lets a stale pending order be replaced", but nothing replaced it: the first order
+  stayed on the book, GTC, until price crossed it. On 7 800 bars of a random walk the replay placed
+  one order and reported "order already resting" 7 799 times. New `entry.refresh_pending`
+  (default `false`, so the baseline is unchanged) replaces a stop whose decision changed and
+  cancels it on a `NoTrade`. It never acts when a position exists — `cancel_order` reports
+  "gone" for an order that has already *filled*.
+- **`--slippage-points` was a no-op.** It shifted every candle by the same amount, and a uniform
+  translation changes no profit. Slippage is now applied to stop-order entry fills and
+  stop-loss exits, adverse only.
+- **A long's take-profit triggered on the ask.** A long closes at the bid, so the target now
+  triggers on the exit-side price. The old rule fired one spread early.
+
+#### Added
+
+- `backtest --spread-points N` (default stays 1; the measured US30 spread is 18) and a
+  one-line round-trip cost note in every report.
+- `backtest --intrabar {close,auto,ohlc,olhc}`: play a bar's price path instead of only its
+  close, with protective levels filled at the level when a path is treated as continuous.
+- `scripts/null_market.py`, the null-market test, and its section in `docs/backtest/README.md`.
+- 23 tests: `test_refresh_pending.py`, `test_simulated_realism.py` and
+  `TestTheHarnessIsNotFlattering`.
+
+#### Documentation
+
+- The commission arithmetic in two docstrings was written against the assumed tick value of 1.0
+  (6 % of the stop). On the measured value it is 60 %.
+
+#### Known, not fixed
+
+- `entry.expiry_candles` is parsed and validated but read by nothing.
+- `refresh_pending` cancels and re-places on every new M1 candle; a live venue would prefer a
+  single order *modify*, and will want rate-limit handling.
+
 ### Phase 7 — Lifecycle and Recovery
 
 #### Added

@@ -80,6 +80,23 @@ __all__ = ["ReplayResult", "ReplayStep", "replay"]
 #: ``ReplayResult.to_dict`` carries them into the output rather than leaving them in the code.
 ASSUMED_BALANCE = Decimal("10000")
 
+#: How a bar's price path is played into the venue.
+#:
+#: ``close``  only the close is published (legacy). Optimistic for stops -- an intrabar
+#:            excursion through a trailing stop is never seen -- and pessimistic for entries,
+#:            because a stop order fills only if the *close* is beyond it.
+#: ``auto``   by the bar's colour: a bar that closed up is played open -> low -> high -> close,
+#:            one that closed down open -> high -> low -> close. The usual heuristic, and the
+#:            only one of the three that does not manufacture whipsaws: a bar that closed on
+#:            its high almost never travelled to the high, then to the low, then back.
+#: ``ohlc``   open -> high -> low -> close.
+#: ``olhc``   open -> low -> high -> close.
+#:
+#: OHLC bars do not record which extreme came first, so neither ``ohlc`` nor ``olhc`` is
+#: "the" answer. Both are plausible paths, and **the pair is a bracket**: a conclusion that
+#: only holds under one ordering is not a conclusion. Tick data is what removes the ambiguity.
+INTRABAR_MODES = frozenset({"close", "auto", "ohlc", "olhc"})
+
 
 @dataclass(frozen=True, slots=True)
 class ReplayStep:
@@ -168,6 +185,9 @@ def replay(
     source: Path | None = None,
     max_cycles: int | None = None,
     starting_balance: Decimal = ASSUMED_BALANCE,
+    slippage_points: Decimal | int | float = 0,
+    spread_points: Decimal | int | float | None = None,
+    intrabar: str = "close",
 ) -> ReplayResult:
     """Replay ``candles`` through the assembled trading stack and summarise the result.
 
@@ -176,6 +196,8 @@ def replay(
     a timeframe mismatch, and a replay that quietly fed it the wrong timeframe *and was
     accepted* would be a look-ahead bug wearing the costume of a result.
     """
+    if intrabar not in INTRABAR_MODES:
+        raise RiskError(f"intrabar must be one of {sorted(INTRABAR_MODES)}, got {intrabar!r}")
     symbol = config.strategy.symbol
     settings = EnvironmentSettings(
         environment=Environment.DRY_RUN, allow_live=False, allow_order=False
@@ -183,7 +205,14 @@ def replay(
     specification = us30_specification(symbol)
     _venue(specification, config)
 
-    broker = SimulatedBroker(settings, balance=starting_balance)
+    slip = Decimal(str(slippage_points))
+    spread = Decimal(1) if spread_points is None else Decimal(str(spread_points))
+    broker = SimulatedBroker(
+        settings,
+        balance=starting_balance,
+        slippage=specification.points_to_price(slip) if slip else Decimal(0),
+        continuous_path=intrabar != "close",
+    )
     broker.connect()
 
     # **Always in memory, even when `state.path` names a file.**
@@ -216,6 +245,7 @@ def replay(
         position_manager=position_manager,
         magic_number=config.execution.magic_number,
         symbol=symbol,
+        refresh_pending=config.strategy.entry.refresh_pending,
     )
     lifecycle.recover()
 
@@ -259,7 +289,19 @@ def replay(
         if not window_m1 or not window_m15:
             break
 
-        _publish(broker, symbol, window_m1[-1], specification)
+        if intrabar != "close":
+            # Play the bar's path *before* the decision it informs: a pending order placed at
+            # the end of the previous cycle faces this bar's whole range, not just its close.
+            # Positions are managed between sub-ticks, as a live loop polling every second
+            # would manage them.
+            broker.set_time(reference)
+            for price in _intrabar_path(window_m1[-1], intrabar)[:-1]:
+                _publish_price(broker, symbol, price, specification, spread)
+                lifecycle.attach_market(broker.tick(symbol), specification)
+                lifecycle.observe_fills()
+                lifecycle.tick(None)
+
+        _publish(broker, symbol, window_m1[-1], specification, spread)
         # **Move the venue's clock to the data.** SimulatedBroker has `set_time` for exactly
         # this and it is not optional: its default is a frozen 2026-01-01, so without this
         # every `placed_at`, `opened_at` and `closed_at` is the same instant. That does not
@@ -314,6 +356,17 @@ def replay(
         "persisted ledger would outlive the venue it describes and make the second run of an "
         "identical command refuse to trade.",
     ]
+    notes.append(
+        f"Spread modelled: {spread} points. Adverse slippage modelled: {slip} points. "
+        f"Price path within a bar: {intrabar}."
+    )
+    if intrabar == "close":
+        notes.append(
+            "Only each bar's close was published, so protective stops never saw an intrabar "
+            "extreme and a stop-order entry filled only if the close was beyond it. Run with "
+            "--intrabar auto, and with ohlc and olhc to see how much the ordering matters."
+        )
+    notes.append(_cost_note(config, specification, spread))
     if source is None:
         notes.append(
             "No source file: the candles were generated, not read from history. Nothing here "
@@ -337,6 +390,58 @@ def replay(
         steps=tuple(steps),
         specification=specification,
         notes=tuple(notes),
+    )
+
+
+def _intrabar_path(candle: Candle, mode: str) -> list[Decimal]:
+    """The prices a bar passes through, in order, ending on its close."""
+    high_first = (
+        candle.close.value < candle.open.value if mode == "auto" else mode == "ohlc"
+    )
+    first, second = (
+        (candle.high.value, candle.low.value)
+        if high_first
+        else (candle.low.value, candle.high.value)
+    )
+    return [candle.open.value, first, second, candle.close.value]
+
+
+def _publish_price(
+    broker: SimulatedBroker,
+    symbol: str,
+    price: Decimal,
+    specification: SymbolSpecification,
+    spread_points: Decimal,
+) -> None:
+    broker.publish(
+        symbol,
+        price,
+        price + specification.point * spread_points,
+        digits=specification.digits,
+    )
+
+
+def _cost_note(config: AppConfig, specification: SymbolSpecification, spread: Decimal) -> str:
+    """What one round trip costs *relative to what the stop risks*, in one line.
+
+    Commission and spread are paid on every trade whether it wins or not, so the number that
+    decides whether a rule can work at all is their size against the stop distance. It is
+    stated in the report because it is invisible in the configuration: ``6.0`` and ``100``
+    look unrelated until the tick value turns them into dollars.
+    """
+    per_point = specification.tick_value / specification.tick_size * specification.point
+    stop_points = Decimal(config.strategy.target.stop_loss_points)
+    risk_lot = stop_points * per_point
+    risk_cfg = config.strategy.risk
+    commission_lot = risk_cfg.commission_per_lot * Decimal(risk_cfg.commission_mode.sides)
+    spread_lot = spread * per_point
+    if risk_lot <= 0:
+        return "Cost note unavailable: the stop distance is not positive."
+    total = commission_lot + spread_lot
+    return (
+        f"Round-trip cost per lot: commission {commission_lot} + spread {spread_lot} = {total}, "
+        f"against {risk_lot} of price risk at a {stop_points}-point stop "
+        f"({(total / risk_lot * 100):.0f}% of the stop distance, paid on every trade)."
     )
 
 
@@ -427,17 +532,26 @@ def _validate_series(candles: Sequence[Candle]) -> None:
 
 
 def _publish(
-    broker: SimulatedBroker, symbol: str, candle: Candle, specification: SymbolSpecification
+    broker: SimulatedBroker,
+    symbol: str,
+    candle: Candle,
+    specification: SymbolSpecification,
+    spread_points: Decimal = Decimal(1),
 ) -> None:
-    """Push the newest closed price into the venue, with a one-tick spread.
+    """Push the newest closed price into the venue, with a spread of ``spread_points``.
 
     A venue with no spread fills a stop at exactly its level, and the strategy would look
-    better than it is. The spread is a point wide because that is the assumed minimum tick --
-    a real one is unknown, and :class:`ReplayResult` reports that.
+    better than it is. The legacy default is one point -- the assumed minimum tick -- but
+    the spread measured on the Alpari US30 demo was 18 points (``docs/mt5/MEASURED_US30.json``),
+    so pass ``--spread-points`` for anything that is going to be quoted. The value used is
+    reported in the result's notes.
     """
     close = candle.close.value
     broker.publish(
-        symbol, close, close + specification.point, digits=specification.digits
+        symbol,
+        close,
+        close + specification.point * spread_points,
+        digits=specification.digits,
     )
 
 

@@ -17,10 +17,11 @@ own numbers::
     total_per_lot  = price_per_lot + commission_per_lot
     volume         = budget / total_per_lot
 
-That is the whole reason ``SymbolSpecification`` exists. On the project's assumed ``US30``
-(point ``0.1``, tick ``0.1``, tick value ``1.0``/lot) a 100-point stop costs **$100 per
-lot**, not $100. An implementation that multiplied the point count by a price would get
-this wrong by a factor of 100, and would not raise anything.
+That is the whole reason ``SymbolSpecification`` exists. On the *measured* Alpari ``US30``
+(point ``0.1``, tick ``0.1``, tick value ``0.1``/lot) a 100-point stop costs **$10 per lot**.
+(Before the measurement the tick value was assumed to be 1.0, which made it $100.) An
+implementation that multiplied the point count by a price would get this wrong by a factor of
+100, and would not raise anything.
 
 **Balance, never equity.** Sizing from equity would silently increase risk after a losing
 streak -- exactly when risk should not grow.

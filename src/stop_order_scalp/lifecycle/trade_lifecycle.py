@@ -133,6 +133,7 @@ class TradeLifecycle:
         "_order_manager",
         "_position_manager",
         "_reconciler",
+        "_refresh_pending_enabled",
         "_specification",
         "_symbol",
         "_tick",
@@ -150,7 +151,9 @@ class TradeLifecycle:
         symbol: str | None = None,
         interlock: Any = None,
         listeners: Sequence[TransitionListener] | None = None,
+        refresh_pending: bool = False,
     ) -> None:
+        self._refresh_pending_enabled = refresh_pending
         self._broker = broker
         self._ledger = ledger
         self._order_manager = order_manager
@@ -267,10 +270,67 @@ class TradeLifecycle:
         if closed:
             actions.extend(self._on_position_closed(closed))
 
+        if decision is not None and self._refresh_pending_enabled:
+            actions.extend(self._refresh_pending(decision))
+
         if decision is not None and self._machine.quiet:
             actions.extend(self._enter(decision))
 
         return self._step(tuple(actions))
+
+    def _refresh_pending(self, decision: Any) -> list[str]:
+        """Take a resting order off the book when the current decision no longer supports it.
+
+        A pending stop is anchored on one M1 candle. Left alone it never follows the market:
+        price walks away from it, the M15 direction can flip underneath it, and it eventually
+        fills -- possibly hours later, against the direction the strategy would allow now.
+        ``docs/execution/EXECUTION.md`` section 3 says a new candle "lets a stale pending order
+        be replaced"; this is that replacement.
+
+        * a plan with the **same side and entry price** keeps the existing order (no churn);
+        * any other plan, or a ``NoTrade``, cancels it, and the caller may then place the new one.
+
+        Never acts when a position exists for this magic number. ``cancel_order`` reports
+        "gone" for an order that has already *filled*, so a cancel must not be trusted on its
+        own: a fill that raced this pass is adopted by :meth:`observe_fills`, not cancelled.
+        """
+        if self._machine.state is not LifecycleState.STATE_WAITING_FOR_TRIGGER:
+            return []
+        magic = self._reconciler._magic
+        symbol = self._symbol or None
+        if self._broker.positions(magic_number=magic, symbol=symbol):
+            return []
+        working = list(self._broker.orders(magic_number=magic, symbol=symbol))
+        if not working:
+            # Waiting on a trigger with nothing on the book and no position: the order is gone
+            # (filled and closed between two observations, or removed elsewhere). Left alone
+            # the machine would wait for it forever and never offer a replacement.
+            if self._machine.can(LifecycleState.STATE_WAITING_FOR_SIGNAL):
+                self._machine.move(
+                    LifecycleState.STATE_WAITING_FOR_SIGNAL,
+                    reason="no working order and no position",
+                )
+            return []
+        if isinstance(decision, TradePlan) and any(
+            order.kind.side is decision.side and order.entry == decision.entry
+            for order in working
+        ):
+            return []
+
+        actions: list[str] = []
+        for order in working:
+            actions.extend(self.cancel_pending(order.ticket).actions)
+        if self._broker.positions(magic_number=magic, symbol=symbol):
+            self._notes.append("a fill raced the refresh; the position will be adopted, not replaced")
+            return actions
+        if self._broker.orders(magic_number=magic, symbol=symbol):
+            self._notes.append("a stale order could not be confirmed cancelled; not replacing")
+            return actions
+        if self._machine.can(LifecycleState.STATE_WAITING_FOR_SIGNAL):
+            self._machine.move(
+                LifecycleState.STATE_WAITING_FOR_SIGNAL, reason="stale pending order removed"
+            )
+        return actions
 
     def _enter(self, decision: Any) -> list[str]:
         """Act on a strategy decision, if one is a plan and the system is at rest.

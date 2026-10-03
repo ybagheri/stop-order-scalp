@@ -297,8 +297,15 @@ class EntrySettings:
     candle_selection: TimeframeSelection = TimeframeSelection.LAST_CLOSED
     lookback: int = 5
     expiry_candles: int | None = None
+    #: Replace (or cancel) a resting pending order when a fresh decision no longer supports
+    #: it. ``False`` keeps the legacy behaviour: the first order stays on the book until it fills.
+    refresh_pending: bool = False
 
     def __post_init__(self) -> None:
+        if not isinstance(self.refresh_pending, bool):
+            raise ConfigError(
+                f"entry.refresh_pending must be true or false, got {self.refresh_pending!r}"
+            )
         if self.timeframe == self.direction_timeframe:
             raise ConfigError(
                 f"entry.timeframe and entry.direction_timeframe are both {self.timeframe}; "
@@ -634,6 +641,7 @@ class AppConfig:
                     "direction_timeframe": self.strategy.entry.direction_timeframe,
                     "offset_points": self.strategy.entry.offset_points,
                     "candle_selection": str(self.strategy.entry.candle_selection),
+                    "refresh_pending": self.strategy.entry.refresh_pending,
                 },
                 "risk": {
                     "mode": str(self.strategy.risk.mode),
@@ -830,7 +838,7 @@ def _reject_unknown_keys(raw: Mapping[str, Any], path: Path) -> None:
         raise ConfigError(f"{path}: unknown configuration keys {unknown}. Fix or remove them.")
 
     nested_allowed: dict[str, set[str]] = {
-        "entry": {"timeframe", "direction_timeframe", "offset_points", "candle_selection", "lookback", "expiry_candles"},
+        "entry": {"timeframe", "direction_timeframe", "offset_points", "candle_selection", "lookback", "expiry_candles", "refresh_pending"},
         "risk": {
             "mode",
             "percent",

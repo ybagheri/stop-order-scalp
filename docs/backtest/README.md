@@ -24,7 +24,9 @@ python -m stop_order_scalp backtest --data us30_2026-03.csv --output reports/mar
 | --- | --- |
 | `--data PATH` | required. The command refuses to invent candles |
 | `--from` / `--to` | ISO-8601 window; a naive bound is read as UTC |
-| `--slippage-points N` | adverse slippage. Negative is refused |
+| `--slippage-points N` | adverse slippage on stop-order entry fills and stop-loss exits. Negative is refused |
+| `--spread-points N` | bid/ask spread. Default is the legacy **1 point**; the measured Alpari US30 spread was **18**. Pass it for anything you intend to quote |
+| `--intrabar MODE` | `close` (legacy), `auto` (by bar colour), `ohlc`, `olhc`. See *The null-market test* |
 | `--max-cycles N` | stop after N bars |
 | `--output PATH` | write the full report, including every bar and trade |
 | `--symbol NAME` | override the configured symbol |
@@ -127,6 +129,34 @@ Two results in opposite directions from the same code and the same data is the s
 possible argument for re-running this after every change to the candle layer.
 
 
+## The null-market test
+
+A random walk has nothing for any rule to find. Whatever a backtest reports on one is the
+harness's own bias plus costs, and that is the number to hold a real result against.
+[`scripts/null_market.py`](../../scripts/null_market.py) generates one (7 800 bars, 6 points of
+noise per minute, no drift) and replays it:
+
+| commission | spread | `close` | `auto` | `ohlc` | `olhc` |
+| --- | --- | --- | --- | --- | --- |
+| 0 | 1 | **+2171** | **+3356** | −1374 | −485 |
+| 0 | 18 | −1044 | −400 | −4863 | −3228 |
+| 6 | 1 | −2041 | −3487 | −5890 | −5413 |
+| 6 | 18 | −3812 | −5128 | −7438 | −6539 |
+
+Net on 10 000, with `entry.refresh_pending: true`. Three things follow.
+
+- **The harness is not a measuring instrument for this rule yet.** With no commission and a
+  one-point spread, pure noise "earns" up to +34 % or "loses" up to 14 % depending only on the
+  assumed order of high and low inside a bar. No plausible edge is that large, so a real-data
+  result that sits inside this band says nothing. Tick data is what removes the band.
+- **Costs dominate.** With the configured `$6` commission and the measured 18-point spread, no
+  price path rescues the rule on a market with no edge. The real question is whether the rule has
+  an edge of at least about `0.8 R` per trade, because that is what each round trip costs
+  (`commission 6.0 + spread 1.80` against `10.0` of price risk at a 100-point stop).
+- **Verify the commission.** `$6` per lot round trip is a configured assumption, not something
+  read from the account. If the account is spread-only, set `commission_per_lot: 0` and the
+  picture changes completely. Read it from the deal history of a demo trade.
+
 ## What this does not tell you
 
 **A replay measures this rule on this file.** It does not measure the rule. One CSV is one
@@ -147,7 +177,9 @@ Three further limits, all reported in the output rather than buried here:
 - **Fills are optimistic in one specific way.** A stop order fills when price crosses it, at
   the level, on the bar that crossed it. Real venues fill with slippage and gaps.
   `--slippage-points` exists for that, and it is adverse only — a negative value would be a
-  quiet way to improve every result, so it is refused.
+  quiet way to improve every result, so it is refused. (Until this was fixed the flag shifted
+  every candle by the same amount, which changes no profit: results at 0, 50 and 500 points
+  were identical.)
 
 ## The sample result, and what it actually says
 

@@ -213,13 +213,25 @@ class _Position:
             delta = -delta
         return Money.of(_value_of_move(spec, delta) * self.volume.lots, _CURRENCY)
 
+    def stop_hit(self, tick: SimulatedTick) -> bool:
+        """Whether it is the *stop loss* (not the target) that has been reached."""
+        if self.stop_loss is None:
+            return False
+        worst = tick.price_for(self.side.opposite)
+        if self.side is Side.SIDE_BUY:
+            return worst <= self.stop_loss
+        return worst >= self.stop_loss
+
     def protective_hit(self, tick: SimulatedTick) -> bool:
         """Whether a protective level would have triggered at this price."""
         if self.stop_loss is None and self.take_profit is None:
             return False
         # Stops trigger on the adverse side, targets on the favourable one.
         worst = tick.price_for(self.side.opposite)
-        best = tick.price_for(self.side)
+        # A long closes by selling at the bid and a short by buying at the ask, so the target
+        # is judged against that same price. It used to be judged against the *entry* side's
+        # price, which let a target trigger one spread early.
+        best = worst
         if self.stop_loss is not None:
             if self.side is Side.SIDE_BUY and worst <= self.stop_loss:
                 return True
@@ -283,7 +295,23 @@ class SimulatedBroker:
         clock: Clock | None = None,
         balance: Decimal = Decimal("10000"),
         leverage: int = 100,
+        slippage: Decimal = Decimal(0),
+        continuous_path: bool = False,
     ) -> None:
+        if slippage < 0:
+            raise BrokerError(
+                f"slippage must be a non-negative price distance, got {slippage}; a negative "
+                "value would make every fill better than the level"
+            )
+        #: Adverse slippage as a **price distance**, applied to stop-order entry fills and to
+        #: stop-loss exits. Never to take-profit exits, which fill at the level or better.
+        self._slippage = slippage
+        #: ``True`` when published quotes are *samples of a continuous path* (an OHLC bar's
+        #: extremes), not the only prices that existed. A protective level crossed between two
+        #: samples then fills **at the level**, as a real stop does, rather than at the next
+        #: sample -- which can be a whole bar's range away and manufactures a loss on every
+        #: stop-out. ``False`` keeps the legacy behaviour (fill at the published quote).
+        self._continuous_path = continuous_path
         self._settings = settings
         self._clock = clock or FixedClock(datetime(2026, 1, 1, tzinfo=UTC))
         self._balance = balance
@@ -645,12 +673,20 @@ class SimulatedBroker:
                 continue
             if side is Side.SIDE_SELL and trigger_price > record.entry:
                 continue
+            fill = (
+                record.entry
+                if not self._slippage
+                else Price(
+                    record.entry.value + (self._slippage if side is Side.SIDE_BUY else -self._slippage),
+                    record.entry.digits,
+                )
+            )
             position = _Position(
                 ticket=self._take_ticket(),
                 symbol=symbol,
                 side=side,
                 volume=record.volume,
-                entry=record.entry,
+                entry=fill,
                 stop_loss=record.stop_loss,
                 take_profit=record.take_profit,
                 opened_at=self.now,
@@ -670,7 +706,17 @@ class SimulatedBroker:
             if position.symbol != symbol:
                 continue
             if position.protective_hit(quote):
-                self.close(ticket)
+                exit_at: Decimal | None = None
+                stopped = position.stop_hit(quote)
+                sign = Decimal(-1) if position.side is Side.SIDE_BUY else Decimal(1)
+                if self._continuous_path:
+                    level = position.stop_loss if stopped else position.take_profit
+                    if level is not None:
+                        exit_at = level.value + (sign * self._slippage if stopped else Decimal(0))
+                elif self._slippage and stopped:
+                    base = quote.price_for(position.side.opposite).value
+                    exit_at = base + sign * self._slippage
+                self.close(ticket, at=exit_at)
 
     def _expire(self, symbol: str) -> None:
         moment = self.now

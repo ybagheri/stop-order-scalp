@@ -69,9 +69,7 @@ def run_backtest_from_args(args: argparse.Namespace, config: AppConfig) -> dict[
             raise ConfigError("the --from/--to window contains no complete candle window")
 
     slippage = _slippage_points(getattr(args, "slippage_points", 0.0))
-    if slippage:
-        candles = _apply_slippage(candles, slippage)
-        m15 = aggregate(candles, timeframe, config.strategy.entry.direction_timeframe)
+    spread = _spread_points(getattr(args, "spread_points", None))
 
     result = replay(
         config,
@@ -79,12 +77,17 @@ def run_backtest_from_args(args: argparse.Namespace, config: AppConfig) -> dict[
         m15_candles=m15,
         source=path,
         max_cycles=getattr(args, "max_cycles", None),
+        slippage_points=slippage,
+        spread_points=spread,
+        intrabar=str(getattr(args, "intrabar", "close") or "close"),
     )
     report = result.to_dict()
     report["window"] = {
         "from": candles[0].open_time.isoformat() if candles else None,
         "to": candles[-1].open_time.isoformat() if candles else None,
         "slippage_points": str(slippage),
+        "spread_points": "1 (legacy default)" if spread is None else str(spread),
+        "intrabar": str(getattr(args, "intrabar", "close") or "close"),
         "direction_timeframe": config.strategy.entry.direction_timeframe,
     }
 
@@ -137,31 +140,13 @@ def _slippage_points(value: Any) -> Decimal:
     return points
 
 
-def _apply_slippage(candles: list[Any], points: Decimal) -> list[Any]:
-    """Worsen every bar by ``points``, so a fill is never better than the recorded price.
-
-    Adverse only, and applied to the whole bar rather than to fills alone, so the strategy
-    sees a market that moved against it. Modelling it any other way would let a backtest
-    choose its own execution quality.
-    """
-    from dataclasses import replace
-
-    from stop_order_scalp.domain.value_objects import Price
-
-    if points == 0:
-        return candles
-    adjusted = []
-    for candle in candles:
-        adjusted.append(
-            replace(
-                candle,
-                open=Price(candle.open.value + points, candle.open.digits),
-                high=Price(candle.high.value + points, candle.high.digits),
-                low=Price(candle.low.value + points, candle.low.digits),
-                close=Price(candle.close.value + points, candle.close.digits),
-            )
-        )
-    return adjusted
+def _spread_points(value: Any) -> Decimal | None:
+    if value is None:
+        return None
+    points = Decimal(str(value))
+    if points < 0:
+        raise ConfigError(f"--spread-points cannot be negative (got {points})")
+    return points
 
 
 def _with_symbol(config: AppConfig, symbol: str) -> AppConfig:

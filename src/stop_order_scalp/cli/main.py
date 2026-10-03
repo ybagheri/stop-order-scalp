@@ -166,6 +166,19 @@ def build_parser() -> argparse.ArgumentParser:
     backtest.add_argument("--from", dest="start", default=None, help="ISO-8601 start timestamp")
     backtest.add_argument("--to", dest="end", default=None, help="ISO-8601 end timestamp")
     backtest.add_argument("--slippage-points", type=float, default=0.0, help="adverse fill slippage, in points")
+    backtest.add_argument(
+        "--spread-points",
+        type=float,
+        default=None,
+        help="bid/ask spread in points (default: 1, the legacy optimistic value; measured US30 on Alpari: 18)",
+    )
+    backtest.add_argument(
+        "--intrabar",
+        choices=("close", "auto", "ohlc", "olhc"),
+        default="close",
+        help="price path played inside each bar: close only (legacy); auto (by bar colour, "
+        "recommended); or a fixed ohlc / olhc ordering to test sensitivity to it",
+    )
     backtest.add_argument("--output", type=Path, default=None, metavar="PATH", help="write the report to a file")
     backtest.add_argument(
         "--max-cycles",

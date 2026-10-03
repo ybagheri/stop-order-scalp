@@ -603,3 +603,48 @@ class TestTheTypeItself:
         ).to_dict()
         assert payload["trades"]["win_rate"] is None
         assert payload["money"]["profit_factor"] is None
+
+
+class TestTheHarnessIsNotFlattering:
+    """What a backtest quotes must not depend on a flag that does nothing."""
+
+    def test_slippage_actually_changes_the_result(self, config: AppConfig) -> None:
+        data = trending()
+        free = run(config, data, slippage_points=0)
+        slipped = run(config, data, slippage_points=30)
+
+        assert free.statistics.closed_count >= 1, "the series must trade or this proves nothing"
+        assert slipped.statistics.ending_balance < free.statistics.ending_balance
+
+    def test_the_spread_is_a_parameter_and_is_reported(self, config: AppConfig) -> None:
+        result = run(config, trending(), spread_points=18)
+
+        joined = " ".join(result.notes)
+        assert "Spread modelled: 18 points" in joined
+        assert "of the stop distance" in joined
+
+    def test_a_wider_spread_never_helps(self, config: AppConfig) -> None:
+        data = trending()
+        narrow = run(config, data, spread_points=1)
+        wide = run(config, data, spread_points=18)
+
+        assert wide.statistics.ending_balance <= narrow.statistics.ending_balance
+
+    @pytest.mark.parametrize("mode", ["auto", "ohlc", "olhc"])
+    def test_every_intrabar_mode_replays_and_says_which_it_used(
+        self, config: AppConfig, mode: str
+    ) -> None:
+        result = run(config, series(), intrabar=mode)
+
+        assert f"Price path within a bar: {mode}" in " ".join(result.notes)
+
+    def test_an_unknown_intrabar_mode_is_refused(self, config: AppConfig) -> None:
+        from stop_order_scalp.domain.exceptions import RiskError
+
+        with pytest.raises(RiskError, match="intrabar"):
+            run(config, series(), intrabar="tick")
+
+    def test_close_only_says_that_it_is_close_only(self, config: AppConfig) -> None:
+        result = run(config, series())
+
+        assert any("Only each bar's close was published" in note for note in result.notes)
