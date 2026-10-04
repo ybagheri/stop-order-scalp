@@ -123,8 +123,10 @@ order:
   lifetime_seconds: null
   # Maximum deviation from the requested price, in points.
   deviation_points: 20
-  # Fill policy applied when the broker supports it.
-  filling_policy: FOK
+  # Filling mode sent with a pending order: RETURN, IOC or FOK. RETURN is the one MetaQuotes'
+  # own pending-order example uses and the one most brokers accept for a stop. If the broker
+  # answers retcode 10030 ("unsupported filling mode"), this is the setting to change.
+  filling_policy: RETURN
   # Expire the pending order if the stop or target is closer to entry than this many
   # points -- a guard against a spread that makes the trade meaningless. 0 disables.
   min_stop_points: 0

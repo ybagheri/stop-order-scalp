@@ -131,8 +131,6 @@ class MT5Api(Protocol):
         self, symbol: str, timeframe: int, start: int, count: int
     ) -> RatesTable | None: ...
 
-    def time_current(self) -> int: ...
-
     # --- execution surface -----------------------------------------------
     #
     # Phase 5 added these. They are declared here rather than in the execution layer for
@@ -144,11 +142,14 @@ class MT5Api(Protocol):
     def order_send(self, request: dict[str, Any]) -> Any:
         """Send a trade request. Returns a result row carrying ``retcode``."""
 
-    def order_get(self, *, ticket: int) -> Any:
-        """One working order by ticket, or ``None``."""
+    def orders_get(self, *, symbol: str | None = ..., ticket: int | None = ...) -> Any:
+        """Working orders, optionally for one symbol or one ticket.
 
-    def orders_get(self, *, symbol: str | None = ...) -> Any:
-        """Working orders, optionally for one symbol."""
+        The package has **no** ``order_get``: one order by ticket is ``orders_get(ticket=...)``,
+        which returns a tuple (or ``None``). The protocol used to declare ``order_get`` and
+        ``time_current``, neither of which exists in the real package, and the test doubles
+        implemented both -- so every test passed against an API that was never there.
+        """
 
     def positions_get(
         self, *, symbol: str | None = ..., ticket: int | None = ...
@@ -383,6 +384,29 @@ def _money_reader(currency: str) -> Any:
         return Money(Decimal(str(value)), currency)
 
     return read
+
+
+def server_seconds(api: Any, symbol: str | None) -> int:
+    """Broker server time as epoch seconds, or ``0`` when it cannot be read.
+
+    The MetaTrader5 package has no ``time_current()``. The server's clock is available as the
+    ``time`` of the newest tick of any symbol, and that is the same clock the candle stamps
+    use -- which is the only reason to prefer it to the machine clock: rates carry **server**
+    time, so comparing them with local UTC is wrong by the server's offset (2-3 hours on many
+    brokers) and every "has this bar closed" answer with it.
+
+    A closed market simply has an old last tick; the candles are old with it, so the two
+    stay consistent.
+    """
+    reader = getattr(api, "time_current", None)  # not in the real package; kept for doubles
+    if callable(reader):
+        return int(reader() or 0)
+    if not symbol:
+        return 0
+    info = api.symbol_info_tick(symbol)
+    if info is None:
+        return 0
+    return int(field(info, "time", 0) or 0)
 
 
 def _is_demo(info: Any) -> bool:

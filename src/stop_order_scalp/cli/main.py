@@ -129,9 +129,39 @@ def build_parser() -> argparse.ArgumentParser:
     mode.add_argument("--dry-run", action="store_true", help="execute the full pipeline against the simulator")
     mode.add_argument("--paper", action="store_true", help="follow live prices, send nothing")
     mode.add_argument(
+        "--demo",
+        action="store_true",
+        help="real market data from the terminal's DEMO account. Observes only unless "
+        "--place-orders is also given",
+    )
+    mode.add_argument(
         "--live",
         action="store_true",
         help="place real orders (refused unless SOS_ALLOW_LIVE=true and SOS_ALLOW_ORDER=true)",
+    )
+    run.add_argument(
+        "--place-orders",
+        action="store_true",
+        help="with --demo: actually send orders to the demo account (also needs "
+        "SOS_ALLOW_ORDER=true and SOS_ENVIRONMENT=DEMO)",
+    )
+    run.add_argument(
+        "--max-orders",
+        type=int,
+        default=1,
+        help="with --demo --place-orders: stop placing after this many orders (default 1)",
+    )
+    run.add_argument(
+        "--duration",
+        type=float,
+        default=None,
+        metavar="SECONDS",
+        help="with --demo: stop after this long",
+    )
+    run.add_argument(
+        "--keep-orders",
+        action="store_true",
+        help="with --demo: leave resting orders on the account when the run ends",
     )
     run.add_argument("--max-cycles", type=int, default=None, help="stop after this many decision cycles")
     run.add_argument("--interval", type=float, default=None, help="override execution.poll_interval_seconds")
@@ -274,7 +304,37 @@ def _cmd_test_connection(args: argparse.Namespace, config: AppConfig, out: TextI
     return EXIT_OK if report["connected"] else EXIT_NOT_CONNECTED
 
 
+def _cmd_demo(args: argparse.Namespace, config: AppConfig, out: TextIO, err: TextIO) -> int:
+    build_demo_service = _resolve("stop_order_scalp.application.demo", "build_demo_service")
+    DemoUnavailable = _resolve("stop_order_scalp.application.demo", "DemoUnavailable")
+
+    def log(line: str) -> None:
+        err.write(line + "\n")
+        err.flush()
+
+    try:
+        service = build_demo_service(
+            config,
+            place_orders=args.place_orders,
+            max_orders=args.max_orders,
+            cancel_on_exit=not args.keep_orders,
+            log=log,
+        )
+    except DemoUnavailable as exc:
+        _fail(err, EXIT_UNAVAILABLE, str(exc))
+        return EXIT_UNAVAILABLE
+
+    report = service.run(max_polls=args.max_cycles, duration_seconds=args.duration)
+    _emit(out, {"command": "run --demo", **report})
+    return EXIT_OK
+
+
 def _cmd_run(args: argparse.Namespace, config: AppConfig, out: TextIO, err: TextIO) -> int:
+    if args.demo:
+        return _cmd_demo(args, config, out, err)
+    if args.place_orders:
+        _fail(err, EXIT_CONFIG, "--place-orders is only meaningful with --demo")
+        return EXIT_CONFIG
     build_service = _resolve("stop_order_scalp.application.service", "build_service")
     load_candles_csv = _resolve(
         "stop_order_scalp.application.service", "load_candles_csv"

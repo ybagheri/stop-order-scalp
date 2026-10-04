@@ -66,6 +66,7 @@ from typing import Any
 from stop_order_scalp.domain.enums import LifecycleState, PositionState, TradeEventKind
 from stop_order_scalp.domain.exceptions import (
     BrokerNotConnectedError,
+    BrokerRejectedError,
     ExecutionUnknownError,
 )
 from stop_order_scalp.domain.interfaces import Broker, Clock
@@ -134,6 +135,7 @@ class TradeLifecycle:
         "_position_manager",
         "_reconciler",
         "_refresh_pending_enabled",
+        "_settings",
         "_specification",
         "_symbol",
         "_tick",
@@ -152,8 +154,12 @@ class TradeLifecycle:
         interlock: Any = None,
         listeners: Sequence[TransitionListener] | None = None,
         refresh_pending: bool = False,
+        settings: Any = None,
     ) -> None:
         self._refresh_pending_enabled = refresh_pending
+        #: The environment the gate is judged against when a caller does not state one. See
+        #: :meth:`_gate_refusal`.
+        self._settings = settings
         self._broker = broker
         self._ledger = ledger
         self._order_manager = order_manager
@@ -278,6 +284,28 @@ class TradeLifecycle:
 
         return self._step(tuple(actions))
 
+    def _gate_refusal(self, settings: Any) -> str | None:
+        """The code of a refusal if the order gate is closed, else ``None``. **Fails closed.**
+
+        Until this existed the gate was consulted only when a caller *passed* ``settings``, and
+        the ordinary path -- ``tick`` -> ``_enter`` -> ``place_order(plan)`` -- passed none. A
+        simulated broker could not lose money so nothing noticed; a real one would have been
+        sent orders whatever ``SOS_ALLOW_ORDER`` said.
+
+        Now the lifecycle is given its environment at construction. With none, only a gate that
+        says it is simulated may proceed; a real gate that cannot be evaluated refuses.
+        """
+        gate = getattr(self._order_manager, "gate", None)
+        if gate is None:
+            return None
+        effective = settings if settings is not None else self._settings
+        if effective is None:
+            if getattr(gate, "simulated", False):
+                return None
+            return "environment_unknown"
+        decision = gate.check(effective)
+        return None if decision.open else str(decision.code)
+
     def _refresh_pending(self, decision: Any) -> list[str]:
         """Take a resting order off the book when the current decision no longer supports it.
 
@@ -385,12 +413,11 @@ class TradeLifecycle:
 
         # 0. The gate, before anything is written. A refusal must leave no ledger trace, or
         #    recovery would later "resolve" an intent for a trade that never existed.
-        if settings is not None:
-            gate: Any = self._order_manager.gate.check(settings)
-            if gate.refused:
-                self._events.append(TradeEventKind.TRADE_EVENT_ORDER_REJECTED)
-                self._notes.append(f"gate refused: {gate.code}")
-                return self._step(("gate_refused",))
+        refused = self._gate_refusal(settings)
+        if refused is not None:
+            self._events.append(TradeEventKind.TRADE_EVENT_ORDER_REJECTED)
+            self._notes.append(f"gate refused: {refused}")
+            return self._step(("gate_refused",))
 
         if assessment is not None and not assessment.accepted:
             # A caller that already sized the trade gets the verdict respected. Refusing here
@@ -467,6 +494,20 @@ class TradeLifecycle:
         # 3. Send. Exactly once, whatever the outcome.
         try:
             record = self._broker.place_order(intent)
+        except BrokerRejectedError as exc:
+            # The server said no, definitively: nothing exists, so nothing is ambiguous. This
+            # is an *outcome*, not a crash. It used to propagate out of ``tick`` with the
+            # intent unsettled and the machine stranded mid-validation, and a rejection is the
+            # most likely thing to happen on a first run (AutoTrading off, a price that has
+            # moved past the entry, a filling mode the symbol does not take).
+            self._ledger.settle(intent.client_tag, IntentOutcome.REJECTED, reason=str(exc))
+            self._events.append(TradeEventKind.TRADE_EVENT_ORDER_REJECTED)
+            self._notes.append(f"rejected by the broker: {exc}")
+            if self._machine.can(LifecycleState.STATE_WAITING_FOR_SIGNAL):
+                self._machine.move(
+                    LifecycleState.STATE_WAITING_FOR_SIGNAL, reason="order rejected"
+                )
+            return self._step(("rejected",))
         except ExecutionUnknownError as exc:
             self._ledger.mark_unknown(intent.client_tag, str(exc))
             self._machine.move(
@@ -505,6 +546,10 @@ class TradeLifecycle:
         acting on a guess about whether the first attempt landed.
         """
         self._begin()
+        refused = self._gate_refusal(None)
+        if refused is not None:
+            self._notes.append(f"gate refused: {refused}; the order was left alone")
+            return self._step(("gate_refused",))
         try:
             gone = self._broker.cancel_order(ticket)
         except ExecutionUnknownError:
@@ -564,6 +609,12 @@ class TradeLifecycle:
         """
         if self._tick is None or self._specification is None:
             self._notes.append("no market bound; managed exits skipped")
+            return []
+        refused = self._gate_refusal(None)
+        if refused is not None:
+            # Moving a stop changes the account just as placing an order does. An observing
+            # run that finds a position left by an earlier one must not start trailing it.
+            self._notes.append(f"gate refused: {refused}; managed exits skipped")
             return []
         update = self._position_manager.update(
             self._broker,

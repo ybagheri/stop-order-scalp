@@ -36,6 +36,7 @@ from stop_order_scalp.domain.value_objects import SymbolSpecification
 
 __all__ = [
     "MEASURED",
+    "MEASURED_BITCOIN",
     "MEASURED_BY_SYMBOL",
     "MEASURED_DOWJONES30",
     "MEASURED_FROM",
@@ -91,8 +92,6 @@ class MeasuredUS30:
         }
 
 
-
-
 #: As read from Alpari MT5. Superseded for A Markets -- see the table above.
 MEASURED = MeasuredUS30(
     point=Decimal("0.1"),
@@ -127,7 +126,13 @@ MEASURED_DOWJONES30 = MeasuredUS30(
     digits=0,
 )
 
-
+#: Alpari `BITCOIN`, measured 2026-10-03 on `Alpari-MT5-Demo` (``symbol_info``, read by hand).
+#:
+#: Added so the pipeline can be exercised on a 24-hour instrument while the index is closed.
+#: One lot is one coin, `point` is one cent, so a point is worth **$0.01 per lot** and a 100-point
+#: stop is a **$1** stop. The distances in ``config/default.yaml`` were chosen for an index near
+#: 50 000 and mean almost nothing against a coin worth ten times as much; use a separate config
+#: for this symbol. A wiring test, not a claim that this strategy suits the instrument.
 MEASURED_BITCOIN = MeasuredUS30(
     point=Decimal("0.01"),
     tick_size=Decimal("0.01"),
@@ -141,12 +146,11 @@ MEASURED_BITCOIN = MeasuredUS30(
     digits=2,
 )
 
-
 #: Keyed by the broker's own symbol name, because that is the identity the venue uses.
 MEASURED_BY_SYMBOL: dict[str, MeasuredUS30] = {
     "US30": MEASURED,
     "DowJones30": MEASURED_DOWJONES30,
-    "BITCOIN": MEASURED_BITCOIN
+    "BITCOIN": MEASURED_BITCOIN,
 }
 
 

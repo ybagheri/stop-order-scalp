@@ -163,8 +163,11 @@ class FakeTerminal:
         return name.casefold() in {known.casefold() for known in self.selectable}
 
     def symbol_info_tick(self, name: str) -> Any:
+        """The server clock lives in the tick's ``time``; the package has no ``time_current``."""
         del name
-        return SimpleNamespace(**self.tick_row) if self.tick_row else None
+        if not self.tick_row:
+            return None
+        return SimpleNamespace(**{**self.tick_row, "time": self.server_time})
 
     def order_send(self, request: dict[str, Any]) -> Any:
         self.sent.append(dict(request))
@@ -175,14 +178,13 @@ class FakeTerminal:
         ticket = 5000 + len(self.sent)
         return SimpleNamespace(retcode=10008, order=ticket, comment="request placed")
 
-    def order_get(self, *, ticket: int) -> Any:
-        for row in self.order_rows:
-            if row.get("ticket") == ticket:
-                return SimpleNamespace(**row)
-        return None
-
-    def orders_get(self, *, symbol: str | None = None) -> Any:
-        rows = [r for r in self.order_rows if symbol is None or r.get("symbol") == symbol]
+    def orders_get(self, *, symbol: str | None = None, ticket: int | None = None) -> Any:
+        rows = [
+            r
+            for r in self.order_rows
+            if (symbol is None or r.get("symbol") == symbol)
+            and (ticket is None or r.get("ticket") == ticket)
+        ]
         return [SimpleNamespace(**r) for r in rows]
 
     def positions_get(
@@ -214,8 +216,6 @@ class FakeTerminal:
         del symbol, timeframe, start, count
         return []
 
-    def time_current(self) -> int:
-        return self.server_time
 
 
 class FakeModule(MT5Module):
@@ -577,13 +577,13 @@ class TestServerClock:
     def test_it_reads_the_terminals_server_time(
         self, module: FakeModule, terminal: FakeTerminal
     ) -> None:
-        clock = ServerClock(module, FixedClock(datetime(2020, 1, 1, tzinfo=UTC)))
+        clock = ServerClock(module, FixedClock(datetime(2020, 1, 1, tzinfo=UTC)), "US30")
         assert clock.now() == datetime(2026, 3, 12, 12, 0, tzinfo=UTC)
         assert clock.degraded is False
 
     def test_a_server_offset_is_reflected(self, module: FakeModule, terminal: FakeTerminal) -> None:
         terminal.server_time = SERVER_EPOCH + 3 * 3600
-        clock = ServerClock(module, FixedClock(datetime(2020, 1, 1, tzinfo=UTC)))
+        clock = ServerClock(module, FixedClock(datetime(2020, 1, 1, tzinfo=UTC)), "US30")
         assert clock.now() == datetime(2026, 3, 12, 15, 0, tzinfo=UTC)
 
     def test_it_falls_back_visibly_when_the_terminal_is_absent(self) -> None:
@@ -595,14 +595,14 @@ class TestServerClock:
     def test_a_zero_server_time_is_treated_as_not_ready(self, module: FakeModule, terminal: FakeTerminal) -> None:
         terminal.server_time = 0
         fallback = FixedClock(datetime(2026, 3, 12, 12, 0, tzinfo=UTC))
-        clock = ServerClock(module, fallback)
+        clock = ServerClock(module, fallback, "US30")
         assert clock.now() == fallback.now()
         assert clock.degraded is True
 
     def test_recovery_clears_the_degraded_flag(
         self, module: FakeModule, terminal: FakeTerminal
     ) -> None:
-        clock = ServerClock(module, FixedClock(datetime(2020, 1, 1, tzinfo=UTC)))
+        clock = ServerClock(module, FixedClock(datetime(2020, 1, 1, tzinfo=UTC)), "US30")
         terminal.server_time = 0
         clock.now()
         assert clock.degraded is True
@@ -852,6 +852,7 @@ class TestTicksAndAccount:
         self, connected: MT5Feed, terminal: FakeTerminal
     ) -> None:
         terminal.server_time = SERVER_EPOCH + 7200
+        connected.resolve_symbol("US30")
         assert connected.server_time() == datetime(2026, 3, 12, 14, 0, tzinfo=UTC)
 
     def test_symbol_available_is_false_when_disconnected(self, module: FakeModule) -> None:

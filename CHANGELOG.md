@@ -41,6 +41,39 @@ project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 - The commission arithmetic in two docstrings was written against the assumed tick value of 1.0
   (6 % of the stop). On the measured value it is 60 %.
 
+### `run --demo`: the first path to a real broker
+
+#### Added
+
+- `run --demo` (observe only) and `run --demo --place-orders` (orders to a demo account), the
+  `DemoOrderGate`, `application/demo.py`, `scripts/preflight_mt5.py` and
+  `docs/operations/DEMO.md`.
+- A contract test that fails if the code calls any function the real `MetaTrader5` package
+  does not have (`tests/unit/test_mt5_surface.py`).
+
+#### Fixed -- these would each have broken the first real order
+
+- **The order gate was never consulted on the ordinary path.** `tick` -> `place_order(plan)`
+  passed no `settings`, and the gate ran only when `settings` was passed. With a real broker
+  orders would have been sent whatever `SOS_ALLOW_ORDER` said. The lifecycle now holds its
+  environment and **fails closed**: a real gate that cannot be evaluated refuses. Cancels and
+  stop moves are gated too.
+- **Wrong wire constants.** `TRADE_ACTION_PENDING` was `1` (it is `5`; `1` is `DEAL`),
+  `SLTP` was `2` (`6`), and a cancel used the pending action instead of `REMOVE` (`8`). The
+  test asserted the wrong number, so it agreed. Constants are now read from the package.
+- **`order_get` and `time_current` do not exist in the `MetaTrader5` package.** The broker
+  would have sent the order and then raised looking for its ticket; the server clock silently
+  fell back to the local machine's, which is wrong by the server's offset. The ticket is read
+  with `orders_get(ticket=...)` and the server time from the newest tick.
+- **`modify_position` removed the take-profit.** Zero means *remove* in `TRADE_ACTION_SLTP`,
+  and trailing sends only a stop. An omitted level is now re-sent at its current value.
+- **`MetaTrader5Broker.connect` logged in with no password**, which the terminal answers with
+  `-2` and which locked three demo accounts. It now attaches to the terminal's session unless a
+  password is configured, as `MT5Feed` always did.
+- `type_filling` was the string `"FOK"` where the package wants an integer; the default is now
+  `RETURN`, and retcodes 10022, 10025 (no changes: success), 10026, 10027 and 10030 are
+  classified.
+
 #### Known, not fixed
 
 - `entry.expiry_candles` is parsed and validated but read by nothing.

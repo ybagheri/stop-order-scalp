@@ -128,8 +128,9 @@ ignored is the most expensive kind of configuration bug there is.
 | Command | Result |
 | --- | --- |
 | `run --live` | exit 4, with the reason: every wire value and retcode here is still unverified against a real terminal |
+| `run --demo` | real market data from the terminal, **observing only** -- see [DEMO.md](DEMO.md) |
+| `run --demo --place-orders` | sends orders to a **demo** account, behind four independent switches -- see [DEMO.md](DEMO.md) |
 | `run` in any other mode | runs against the simulator, never a broker |
-| `status`, `diagnostics`, `backtest` | exit 4, naming the phase that has not landed |
 
 `LIVE` needs three independent switches — `SOS_ENVIRONMENT=LIVE`, `SOS_ALLOW_LIVE=true` and
 `SOS_ALLOW_ORDER=true` — and that is not decoration. It is a belt-and-braces refusal for a

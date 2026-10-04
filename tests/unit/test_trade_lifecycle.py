@@ -198,11 +198,17 @@ class FakeOrderManager:
 
 
 class _OpenGate:
+    #: These tests use a fake broker that cannot lose money. A gate that does not say so is
+    #: refused when the lifecycle has no environment to judge it by -- see ``_gate_refusal``.
+    simulated = True
+
     def check(self, settings: Any = None) -> Any:
         return type("D", (), {"open": True, "refused": False, "code": "", "reason": ""})()
 
 
 class _ClosedGate:
+    simulated = False
+
     def check(self, settings: Any = None) -> Any:
         return type(
             "D",

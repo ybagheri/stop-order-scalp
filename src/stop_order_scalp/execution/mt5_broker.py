@@ -50,6 +50,7 @@ from stop_order_scalp.market_data.mt5_module import (
     account_info_to_snapshot,
     epoch_to_datetime,
     field,
+    server_seconds,
     symbol_info_to_specification,
     tick_info_to_tick,
 )
@@ -92,6 +93,18 @@ RETCODE_PRICE_CHANGED: Final[int] = 10020
 RETCODE_PRICE_OFF: Final[int] = 10021
 #: Terminal busy. Retryable.
 RETCODE_TOO_BUSY: Final[int] = 10024
+#: The expiration is not acceptable to the venue.
+RETCODE_INVALID_EXPIRATION: Final[int] = 10022
+#: "No changes": a modify that asked for what is already true. Success for an idempotent
+#: ``modify_position``; a trailing stop that has not moved sends exactly this.
+RETCODE_NO_CHANGES: Final[int] = 10025
+#: AutoTrading is switched off -- by the server, or by the terminal's *Algo Trading* button.
+#: The most common reason a first order is refused, and one the operator fixes in a click.
+RETCODE_AUTOTRADING_SERVER: Final[int] = 10026
+RETCODE_AUTOTRADING_CLIENT: Final[int] = 10027
+#: The symbol does not accept this ``type_filling``. Refused before reaching the book, so
+#: nothing exists and nothing is ambiguous; ``order.filling_policy`` is the setting to change.
+RETCODE_INVALID_FILL: Final[int] = 10030
 #: Ambiguous: a failure with no detail.
 RETCODE_ERROR: Final[int] = 10011
 #: Ambiguous: the request timed out, so it may have been processed.
@@ -107,8 +120,19 @@ RETCODE_INTERNAL_ERROR: Final[int] = -1
 
 #: Accepted, in some form.
 _ACCEPTED: Final[frozenset[int]] = frozenset(
-    {RETCODE_DONE, RETCODE_PLACED, RETCODE_PARTIAL}
+    {RETCODE_DONE, RETCODE_PLACED, RETCODE_PARTIAL, RETCODE_NO_CHANGES}
 )
+
+#: What to do about the refusals an operator meets first, appended to the terminal's own words.
+_HINTS: Final[dict[int, str]] = {
+    10026: "enable AutoTrading on the server side for this account",
+    10027: "press the terminal's 'Algo Trading' button (it must be green) and, in "
+    "Tools > Options > Expert Advisors, allow algorithmic trading",
+    10030: "this symbol does not accept the configured filling mode; set "
+    "order.filling_policy to IOC or RETURN (or FOK) in the config and try again",
+    10017: "trading is disabled for this account or symbol",
+    10018: "the market is closed for this symbol",
+}
 
 #: Refused on its merits. A resend will be refused identically.
 _TERMINAL: Final[frozenset[int]] = frozenset(
@@ -120,6 +144,10 @@ _TERMINAL: Final[frozenset[int]] = frozenset(
         RETCODE_INVALID_STOPS,
         RETCODE_TRADE_DISABLED,
         RETCODE_NO_MONEY,
+        RETCODE_INVALID_EXPIRATION,
+        RETCODE_AUTOTRADING_SERVER,
+        RETCODE_AUTOTRADING_CLIENT,
+        RETCODE_INVALID_FILL,
     }
 )
 
@@ -157,6 +185,8 @@ def classify(retcode: int, message: str, *, context: str) -> None:
     if retcode in _ACCEPTED:
         return
     detail = f"{context}: retcode {retcode} ({message})"
+    if retcode in _HINTS:
+        detail = f"{detail}; {_HINTS[retcode]}"
     if retcode in _UNKNOWN:
         raise ExecutionUnknownError(
             f"{detail} -- the terminal cannot say whether the request reached the venue. "
@@ -185,15 +215,23 @@ class MetaTrader5Broker:
     stored on this object. ``EnvironmentSettings`` holds only a presence flag, by design.
     """
 
-    __slots__ = ("_connected", "_module", "_settings")
+    __slots__ = ("_connected", "_filling", "_module", "_settings")
 
     def __init__(
         self,
         module: MT5Module | None = None,
         settings: EnvironmentSettings | None = None,
+        *,
+        filling: str = "RETURN",
     ) -> None:
+        if filling not in _FILLING_VALUES:
+            raise BrokerError(f"filling must be one of {sorted(_FILLING_VALUES)}, got {filling!r}")
         self._module = module if module is not None else MT5Module()
         self._settings = settings
+        #: ``RETURN`` is what MetaQuotes' own pending-order example uses and the one most
+        #: brokers accept for a stop order. Which one a symbol allows is the broker's choice;
+        #: a refusal (retcode 10030) says so, and ``order.filling_policy`` is the setting.
+        self._filling = filling
         self._connected = False
 
     # --- connection ------------------------------------------------------
@@ -209,14 +247,25 @@ class MetaTrader5Broker:
             raise BrokerError("MetaTrader5Broker needs EnvironmentSettings before connect()")
         if self._connected:
             return
-        ok = self._module.api().initialize(
-            path=settings.mt5_path,
-            login=settings.mt5_login,
-            password=os.environ.get("SOS_MT5_PASSWORD") or None,
-            server=settings.mt5_server,
-            timeout=settings.mt5_timeout_ms,
-            portable=False,
-        )
+        password = os.environ.get("SOS_MT5_PASSWORD") or None
+        if password:
+            ok = self._module.api().initialize(
+                path=settings.mt5_path,
+                login=settings.mt5_login,
+                password=password,
+                server=settings.mt5_server,
+                timeout=settings.mt5_timeout_ms,
+                portable=False,
+            )
+        else:
+            # Attach to the session the terminal already has. A login with no password is
+            # answered with error -2 and is how this project locked three demo accounts
+            # (HANDOFF.md). ``MT5Feed.connect`` has always done this.
+            ok = self._module.api().initialize(
+                path=settings.mt5_path,
+                timeout=settings.mt5_timeout_ms,
+                portable=False,
+            )
         if not ok:
             code, message = self._module.describe_last_error()
             raise BrokerNotConnectedError(
@@ -247,9 +296,26 @@ class MetaTrader5Broker:
             raise BrokerNotConnectedError("the terminal returned no account information")
         return account_info_to_snapshot(info)
 
+    def account_is_confirmed_demo(self) -> bool:
+        """``True`` only if the terminal *says* this is a demo account.
+
+        ``account()`` reports ``is_demo`` and defaults it to ``True`` when the terminal does
+        not say, which is the safe default for a reader and the wrong one for a gate: a gate
+        that opens when it cannot tell has opened for a live account. This reads the raw
+        ``trade_mode`` and requires ``ACCOUNT_TRADE_MODE_DEMO`` (0) -- a contest account (1) or
+        a real one (2) is refused, and so is an answer that is missing.
+        """
+        info = self._api().account_info()
+        if info is None:
+            return False
+        mode = field(info, "trade_mode")
+        return mode is not None and int(mode) == 0
+
     def server_time(self) -> datetime:
         """Broker server time. The only clock that may decide whether a candle has closed."""
-        seconds = self._api().time_current()
+        seconds = server_seconds(
+            self._api(), self._settings.symbol if self._settings is not None else None
+        )
         if not seconds:
             raise BrokerNotConnectedError("the terminal reported no server time")
         return epoch_to_datetime(seconds)
@@ -355,7 +421,7 @@ class MetaTrader5Broker:
         """
         api = self._api()
         request: dict[str, Any] = {
-            "action": _ACTION_PENDING,
+            "action": _const(api, "TRADE_ACTION_PENDING", _ACTION_PENDING),
             "symbol": intent.symbol,
             "type": _MT5_TYPE[intent.kind],
             "volume": float(intent.volume.lots),
@@ -365,9 +431,13 @@ class MetaTrader5Broker:
             "deviation": intent.deviation_points,
             "magic": intent.magic_number,
             "comment": encode_comment(intent.client_tag, intent.comment),
-            "type_filling": _FILLING,
+            "type_time": _const(api, "ORDER_TIME_GTC", _TIME_GTC),
+            "type_filling": _const(
+                api, f"ORDER_FILLING_{self._filling}", _FILLING_VALUES[self._filling]
+            ),
         }
         if intent.expiration is not None:
+            request["type_time"] = _const(api, "ORDER_TIME_SPECIFIED", _TIME_SPECIFIED)
             request["expiration"] = int(intent.expiration.timestamp())
         result = api.order_send(request)
         classify(
@@ -376,7 +446,8 @@ class MetaTrader5Broker:
             context=f"placing {intent.kind} on {intent.symbol}",
         )
         ticket = int(field(result, "order", 0) or 0)
-        placed = api.order_get(ticket=ticket) if ticket else None
+        rows = api.orders_get(ticket=ticket) if ticket else None
+        placed = rows[0] if rows else None
         if placed is None:
             # Accepted, but not yet readable. The send succeeded; observing it is a
             # separate concern that belongs to the lifecycle, not here.
@@ -391,7 +462,9 @@ class MetaTrader5Broker:
         order book is where the answer lives.
         """
         api = self._api()
-        result = api.order_send({"action": _ACTION_PENDING, "order": ticket})
+        result = api.order_send(
+            {"action": _const(api, "TRADE_ACTION_REMOVE", _ACTION_REMOVE), "order": ticket}
+        )
         retcode = int(field(result, "retcode", -1) or 0)
         if retcode not in _ACCEPTED:
             if retcode in _UNKNOWN:
@@ -404,10 +477,7 @@ class MetaTrader5Broker:
                     str(field(result, "comment", "") or ""),
                     context=f"cancelling order {ticket}",
                 )
-        return not api.orders_get(symbol=None) or all(
-            int(field(row, "ticket", 0) or 0) != ticket
-            for row in api.orders_get() or ()
-        )
+        return not api.orders_get(ticket=ticket)
 
     def modify_position(
         self, ticket: int, *, stop_loss: Any = None, take_profit: Any = None
@@ -416,13 +486,30 @@ class MetaTrader5Broker:
 
         ``TRADE_ACTION_SLTP`` rather than a deal request: this never fills anything, it only
         moves the stops on a position that already exists.
+
+        **A level that is not being changed is re-sent at its current value.** In this action a
+        zero means *remove*, not *leave alone* -- so sending only the new stop used to send
+        ``tp=0`` and delete the position's take-profit on the first trailing step. (The
+        simulated venue treats an omitted level as unchanged, which is why nothing caught it.)
         """
         api = self._api()
+        rows = api.positions_get(ticket=ticket)
+        current = rows[0] if rows else None
+        if current is None:
+            raise BrokerRejectedError(
+                f"modifying position {ticket}: no open position with that ticket; nothing to modify"
+            )
+
+        def level(given: Any, name: str) -> float:
+            if isinstance(given, Price):
+                return float(given.value)
+            return float(field(current, name, _UNSET_FLOAT) or _UNSET_FLOAT)
+
         request: dict[str, Any] = {
-            "action": _ACTION_SLTP,
+            "action": _const(api, "TRADE_ACTION_SLTP", _ACTION_SLTP),
             "position": ticket,
-            "sl": float(stop_loss.value) if isinstance(stop_loss, Price) else _UNSET_FLOAT,
-            "tp": float(take_profit.value) if isinstance(take_profit, Price) else _UNSET_FLOAT,
+            "sl": level(stop_loss, "sl"),
+            "tp": level(take_profit, "tp"),
         }
         result = api.order_send(request)
         classify(
@@ -441,10 +528,32 @@ class MetaTrader5Broker:
 # =============================================================================
 
 #: ``TRADE_REQUEST_ACTIONS``.
-_ACTION_DEAL: Final[int] = 0
-_ACTION_PENDING: Final[int] = 1
-_ACTION_SLTP: Final[int] = 2
-_ACTION_MODIFY: Final[int] = 3
+#:
+#: These are the **documented** values, used only as a fallback. They were 0/1/2/3 here for ten
+#: phases -- which is ``DEAL`` for nothing, ``DEAL`` for a pending order and two undefined
+#: actions -- and the test double asserted ``== 1`` for "pending", so it agreed. The real
+#: package is asked first (see :func:`_const`), so a wrong number here cannot reach the wire
+#: unless the package itself is missing.
+_ACTION_DEAL: Final[int] = 1
+_ACTION_PENDING: Final[int] = 5
+_ACTION_SLTP: Final[int] = 6
+_ACTION_MODIFY: Final[int] = 7
+_ACTION_REMOVE: Final[int] = 8
+
+#: ``ORDER_FILLING_*`` and ``ORDER_TIME_*``, again as documented fallbacks.
+_FILLING_VALUES: Final[dict[str, int]] = {"FOK": 0, "IOC": 1, "RETURN": 2}
+_TIME_GTC: Final[int] = 0
+_TIME_SPECIFIED: Final[int] = 2
+
+
+def _const(api: Any, name: str, fallback: int) -> int:
+    """A numeric constant from the terminal package, or the documented value.
+
+    Asking the package removes the dependency on anyone's memory of the numbers, mine included.
+    A test double that does not define the name gets the documented fallback.
+    """
+    value = getattr(api, name, None)
+    return int(value) if isinstance(value, int) else fallback
 
 #: ``ORDER_TYPE_*``. Distinct values, and the inverse map is keyed off the same table.
 _TYPE_BUY: Final[int] = 0
@@ -477,12 +586,9 @@ _ORDER_TYPE: Final[dict[int, OrderKind]] = {
 #: MetaTrader 5 truncates order and position comments at 31 characters.
 _COMMENT_LIMIT: Final[int] = 31
 
-#: ``ORDER_FILLING_FOK``: the order either fills completely at the requested price or not at
-#: all. For a pending stop, no partial state exists to reason about.
-_FILLING: Final[str] = "FOK"
 
-#: Zero tells the terminal "leave this level unchanged", which is what an omitted
-#: ``modify_position`` argument means.
+#: A level the terminal reports as ``0`` has no stop or target. NOT "leave unchanged": see
+#: :meth:`MetaTrader5Broker.modify_position`.
 _UNSET_FLOAT: Final[float] = 0.0
 
 

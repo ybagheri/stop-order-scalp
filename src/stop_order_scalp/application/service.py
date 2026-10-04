@@ -67,6 +67,7 @@ __all__ = [
     "aggregate",
     "build_service",
     "load_candles_csv",
+    "size_decision",
     "synthetic_candles",
 ]
 
@@ -269,24 +270,9 @@ class TradingService:
         Returns ``(None, reason)`` rather than raising: declining is the expected outcome
         most of the time, and a report that cannot say *why* it declined is not a report.
         """
-        signal = getattr(decision, "signal", None)
-        if signal is None:
-            return None, _reason(decision) or "no signal"
-        try:
-            plan = self.risk_manager.plan_for(
-                RiskRequest(
-                    signal=signal,
-                    account=self.broker.account(),
-                    specification=self.specification,
-                    risk=self.risk_manager.risk_settings,
-                    target=self.risk_manager.target_settings,
-                )
-            )
-        except RiskError as exc:
-            # The risk engine's own verdict, in its own words. This is where a position
-            # smaller than the broker minimum, or a risk budget that does not fit, shows up.
-            return None, f"risk_refused: {exc}"
-        return plan, f"planned {plan.volume.lots} lots at {plan.entry}"
+        return size_decision(
+            self.risk_manager, self.broker.account(), self.specification, decision
+        )
 
     def _window(
         self, candles: Sequence[Candle], reference: datetime
@@ -308,6 +294,37 @@ class TradingService:
             close + SPREAD_POINTS * MEASURED.point,
             digits=self.specification.digits,
         )
+
+
+def size_decision(
+    risk_manager: RiskManager,
+    account: Any,
+    specification: SymbolSpecification,
+    decision: Any,
+) -> tuple[TradePlan | None, str]:
+    """Turn a strategy decision into a sized plan, or say why not.
+
+    A function rather than a method so the dry run and the demo run size positions with the
+    same code. Two copies of "how big" is how two runs disagree about risk.
+    """
+    signal = getattr(decision, "signal", None)
+    if signal is None:
+        return None, _reason(decision) or "no signal"
+    try:
+        plan = risk_manager.plan_for(
+            RiskRequest(
+                signal=signal,
+                account=account,
+                specification=specification,
+                risk=risk_manager.risk_settings,
+                target=risk_manager.target_settings,
+            )
+        )
+    except RiskError as exc:
+        # The risk engine's own verdict, in its own words. This is where a position smaller
+        # than the broker minimum, or a risk budget that does not fit, shows up.
+        return None, f"risk_refused: {exc}"
+    return plan, f"planned {plan.volume.lots} lots at {plan.entry}"
 
 
 def build_service(

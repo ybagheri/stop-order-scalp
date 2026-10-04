@@ -8,8 +8,8 @@ what makes the boundary reviewable.
 
 Three things are worth stating plainly, because each is a way this could quietly lie.
 
-**Which clock decides that a bar has closed.** Broker server time, from the terminal's own
-``time_current()``, never the local machine clock. See :class:`ServerClock` and
+**Which clock decides that a bar has closed.** Broker server time, read from the newest tick of
+the traded symbol (the package has no ``time_current()``), never the local machine clock. See :class:`ServerClock` and
 ``docs/mt5/SETUP.md`` for the full argument; the short version is that the terminal
 anchors daily bars and session boundaries to server time, so comparing a server-timestamped
 bar against a local clock can be off by hours and would shift every boundary.
@@ -57,6 +57,7 @@ from stop_order_scalp.market_data.mt5_module import (
     as_sequence,
     epoch_to_datetime,
     row_to_candle,
+    server_seconds,
     symbol_info_to_specification,
     tick_info_to_tick,
 )
@@ -88,11 +89,12 @@ class ServerClock:
     the kind of substitution this project refuses to make invisibly.
     """
 
-    __slots__ = ("_degraded", "_fallback", "_module")
+    __slots__ = ("_degraded", "_fallback", "_module", "_symbol")
 
-    def __init__(self, module: MT5Module, fallback: Clock) -> None:
+    def __init__(self, module: MT5Module, fallback: Clock, symbol: str | None = None) -> None:
         self._module = module
         self._fallback = fallback
+        self._symbol = symbol
         self._degraded = False
 
     @property
@@ -103,7 +105,7 @@ class ServerClock:
     def now(self) -> datetime:
         self._degraded = False
         try:
-            seconds = self._module.api().time_current()
+            seconds = server_seconds(self._module.api(), self._symbol)
         except (BrokerNotConnectedError, AttributeError, TypeError):
             self._degraded = True
             return self._fallback.now()
@@ -129,7 +131,7 @@ class MT5Feed:
     :class:`~stop_order_scalp.domain.interfaces.Broker`, in Phase 5.
     """
 
-    __slots__ = ("_api", "_clock", "_connected", "_module", "_specifications", "_symbols")
+    __slots__ = ("_api", "_clock", "_connected", "_module", "_specifications", "_symbols", "_tracked")
 
     def __init__(self, module: MT5Module | None = None, *, clock: Clock | None = None) -> None:
         self._module = module if module is not None else MT5Module()
@@ -137,12 +139,14 @@ class MT5Feed:
         self._connected = False
         self._specifications: dict[str, SymbolSpecification] = {}
         self._symbols: dict[str, str] = {}
+        #: The symbol whose newest tick supplies the server clock. Set by ``resolve_symbol``.
+        self._tracked: str | None = None
 
     # --- connection ------------------------------------------------------
 
     @property
     def server_clock(self) -> ServerClock:
-        return ServerClock(self._module, self._fallback_clock)
+        return ServerClock(self._module, self._fallback_clock, self._tracked)
 
     @property
     def _fallback_clock(self) -> Clock:
@@ -228,6 +232,7 @@ class MT5Feed:
                 continue
             if api.symbol_select(name, True):
                 self._symbols[configured] = name
+                self._tracked = name
                 return name
         raise SymbolNotFoundError(
             f"none of {list(dict.fromkeys([configured, *aliases]))} is available on this "
@@ -289,6 +294,11 @@ class MT5Feed:
         api = self._require_connection()
         name = canonical_name(timeframe)
         digits = self.digits_for(symbol)
+        # Whoever asks for a symbol's bars is trading it, and its newest tick is the only
+        # source of server time. Without this the default reference falls back to the local
+        # clock and "has this bar closed" is wrong by the server's offset.
+        if self._tracked is None:
+            self._tracked = symbol
 
         # One extra bar, because the newest element of a rates table is the one in
         # progress. Requesting the exact count and trusting the feed to exclude it would
@@ -315,6 +325,8 @@ class MT5Feed:
         api = self._require_connection()
         name = canonical_name(timeframe)
         digits = self.digits_for(symbol)
+        if self._tracked is None:
+            self._tracked = symbol
         table = api.copy_rates_from_pos(symbol, to_mt5(name), 0, 1)
         rows = as_sequence(table)
         if not rows:

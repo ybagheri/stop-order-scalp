@@ -107,9 +107,6 @@ class FakeTerminal:
             trade_allowed=True,
         )
 
-    def time_current(self) -> int:
-        return int(EPOCH.timestamp())
-
     def order_send(self, request: dict[str, Any]) -> Any:
         self.sent.append(dict(request))
         if self.send_retcode:
@@ -119,14 +116,13 @@ class FakeTerminal:
         ticket = 7000 + len(self.sent)
         return SimpleNamespace(retcode=10008, order=ticket, comment="request placed")
 
-    def order_get(self, *, ticket: int) -> Any:
-        for row in self.order_rows:
-            if row.get("ticket") == ticket:
-                return SimpleNamespace(**row)
-        return None
-
-    def orders_get(self, *, symbol: str | None = None) -> Any:
-        rows = [r for r in self.order_rows if symbol is None or r.get("symbol") == symbol]
+    def orders_get(self, *, symbol: str | None = None, ticket: int | None = None) -> Any:
+        rows = [
+            r
+            for r in self.order_rows
+            if (symbol is None or r.get("symbol") == symbol)
+            and (ticket is None or r.get("ticket") == ticket)
+        ]
         return [SimpleNamespace(**r) for r in rows]
 
     def positions_get(self, *, symbol: str | None = None, ticket: int | None = None) -> Any:
@@ -173,9 +169,13 @@ def intent_for(plan: TradePlan) -> Any:
 
 
 class TestConnection:
-    def test_connect_passes_the_configured_credentials(
-        self, terminal: FakeTerminal, live_settings: EnvironmentSettings
+    def test_connect_passes_the_configured_credentials_when_a_password_is_set(
+        self,
+        terminal: FakeTerminal,
+        live_settings: EnvironmentSettings,
+        monkeypatch: pytest.MonkeyPatch,
     ) -> None:
+        monkeypatch.setenv("SOS_MT5_PASSWORD", "not-a-real-password")
         holder = MT5Module()
         holder._module = terminal  # type: ignore[assignment]
 
@@ -185,6 +185,23 @@ class TestConnection:
         assert terminal.initialized_with["login"] == 1234567
         assert terminal.initialized_with["server"] == "Alpari-Express-Demo"
         assert terminal.initialized_with["timeout"] == 30000
+
+    def test_without_a_password_it_attaches_and_never_logs_in(
+        self,
+        terminal: FakeTerminal,
+        live_settings: EnvironmentSettings,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """A login with no password is answered with -2 and locked three demo accounts."""
+        monkeypatch.delenv("SOS_MT5_PASSWORD", raising=False)
+        holder = MT5Module()
+        holder._module = terminal  # type: ignore[assignment]
+
+        MetaTrader5Broker(holder, live_settings).connect()
+
+        assert terminal.initialized_with is not None
+        assert "login" not in terminal.initialized_with
+        assert "password" not in terminal.initialized_with
 
     def test_a_refused_connection_raises(self, live_settings: EnvironmentSettings) -> None:
         holder = MT5Module()
@@ -256,7 +273,7 @@ class TestPlaceOrder:
         broker.place_order(intent_for(plan))
 
         assert terminal.sent[0]["type"] == 4
-        assert terminal.sent[0]["action"] == 1, "pending orders use TRADE_ACTION_PENDING"
+        assert terminal.sent[0]["action"] == 5, "TRADE_ACTION_PENDING is 5; 1 is TRADE_ACTION_DEAL"
 
     def test_the_request_carries_the_plans_numbers(
         self, broker: MetaTrader5Broker, terminal: FakeTerminal, plan: TradePlan
@@ -418,6 +435,22 @@ class TestCommentEncoding:
         assert _order_from(row, 1).stop_loss is None
 
 
+def _position_row(ticket: int, *, sl: float, tp: float) -> dict[str, Any]:
+    return {
+        "ticket": ticket,
+        "symbol": "US30",
+        "type": 0,
+        "volume": 0.4,
+        "price_open": 40000.0,
+        "sl": sl,
+        "tp": tp,
+        "magic": 20260930,
+        "comment": "t",
+        "time": int(EPOCH.timestamp()),
+        "profit": 0.0,
+    }
+
+
 class TestCancel:
     def test_cancelling_sends_a_request_and_reports_the_book(
         self, broker: MetaTrader5Broker, terminal: FakeTerminal
@@ -425,6 +458,7 @@ class TestCancel:
         assert broker.cancel_order(7001) is True
         assert len(terminal.sent) == 1
         assert terminal.sent[0]["order"] == 7001
+        assert terminal.sent[0]["action"] == 8, "TRADE_ACTION_REMOVE is 8"
 
     def test_an_order_still_on_the_book_reports_not_cancelled(
         self, broker: MetaTrader5Broker, terminal: FakeTerminal
@@ -454,16 +488,43 @@ class TestModifyPosition:
     ) -> None:
         from stop_order_scalp.domain.value_objects import Price
 
+        terminal.position_rows = [_position_row(42, sl=39990.0, tp=40100.0)]
+
         assert broker.modify_position(42, stop_loss=Price.parse("40005.0", 1)) is True
-        assert terminal.sent[0]["action"] == 2, "TRADE_ACTION_SLTP must not fill anything"
+        assert terminal.sent[0]["action"] == 6, "TRADE_ACTION_SLTP is 6 and must not fill anything"
         assert terminal.sent[0]["position"] == 42
 
-    def test_an_omitted_level_is_sent_as_zero_which_means_unchanged(
+    def test_an_omitted_level_is_resent_at_its_current_value(
         self, broker: MetaTrader5Broker, terminal: FakeTerminal
     ) -> None:
-        broker.modify_position(42, take_profit=None)
-        assert terminal.sent[0]["sl"] == 0.0
-        assert terminal.sent[0]["tp"] == 0.0
+        """Zero means *remove* to the terminal. Trailing sends only a stop; the target must
+        survive it, or the first trailing step deletes the take-profit."""
+        from stop_order_scalp.domain.value_objects import Price
+
+        terminal.position_rows = [_position_row(42, sl=39990.0, tp=40100.0)]
+
+        broker.modify_position(42, stop_loss=Price.parse("40005.0", 1))
+
+        assert terminal.sent[0]["sl"] == pytest.approx(40005.0)
+        assert terminal.sent[0]["tp"] == pytest.approx(40100.0), "the target must not be removed"
+
+    def test_modifying_a_position_that_is_not_open_is_refused_without_sending(
+        self, broker: MetaTrader5Broker, terminal: FakeTerminal
+    ) -> None:
+        with pytest.raises(BrokerRejectedError, match="no open position"):
+            broker.modify_position(42, take_profit=None)
+
+        assert terminal.sent == []
+
+    def test_no_changes_is_success_for_a_trailing_stop_that_has_not_moved(
+        self, broker: MetaTrader5Broker, terminal: FakeTerminal
+    ) -> None:
+        from stop_order_scalp.domain.value_objects import Price
+
+        terminal.position_rows = [_position_row(42, sl=40005.0, tp=40100.0)]
+        terminal.send_retcode = 10025
+
+        assert broker.modify_position(42, stop_loss=Price.parse("40005.0", 1)) is True
 
 
 class TestClassifyIsExercisedThroughTheBroker:

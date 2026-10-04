@@ -406,7 +406,7 @@ class TrailingSettings:
 class OrderSettings:
     lifetime_seconds: int | None = None
     deviation_points: int = 20
-    filling_policy: str = "FOK"
+    filling_policy: str = "RETURN"
     min_stop_points: int = 0
 
     def __post_init__(self) -> None:

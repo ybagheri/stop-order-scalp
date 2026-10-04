@@ -37,6 +37,7 @@ from stop_order_scalp.domain.models import EnvironmentSettings
 
 __all__ = [
     "CloseGate",
+    "DemoOrderGate",
     "Gate",
     "GateDecision",
     "GateRefusal",
@@ -115,6 +116,10 @@ class OrderGate:
 
     enabled: bool = False
 
+    @property
+    def simulated(self) -> bool:
+        return False
+
     def check(self, settings: EnvironmentSettings) -> GateDecision:
         """Evaluate the gate. Returns a decision rather than raising.
 
@@ -175,6 +180,10 @@ class CloseGate:
 
     enabled: bool = False
 
+    @property
+    def simulated(self) -> bool:
+        return False
+
     def check(self, settings: EnvironmentSettings) -> GateDecision:
         """Evaluate the gate, in the same order and for the same reasons as the order gate."""
         if not self.enabled:
@@ -206,6 +215,68 @@ class CloseGate:
 
     def __str__(self) -> str:
         return f"CloseGate(enabled={self.enabled})"
+
+
+@dataclass(frozen=True, slots=True)
+class DemoOrderGate:
+    """Opt-in for placing and cancelling orders on a **demo** account, and only a demo account.
+
+    A separate gate, not a fifth branch in :class:`OrderGate`, so that the three-switch rule
+    for ``LIVE`` is not touched by it and cannot be loosened by it. This one refuses ``LIVE``
+    outright: it opens for ``DEMO`` and nothing else, so a composition mistake that hands it a
+    live environment fails closed.
+
+    Four independent conditions, all required, evaluated cheapest-first:
+
+    1. ``enabled`` -- the operator asked for orders on this run (``--place-orders``);
+    2. ``environment is DEMO``;
+    3. ``allow_order`` -- ``SOS_ALLOW_ORDER=true``, the same per-operation switch as ``LIVE``;
+    4. ``account_confirmed_demo`` -- the terminal itself said ``ACCOUNT_TRADE_MODE_DEMO``. A
+       configuration that *says* DEMO while the terminal is signed in to a real account is
+       exactly the mistake this exists to stop, and no setting can detect it.
+    """
+
+    enabled: bool = False
+    account_confirmed_demo: bool = False
+
+    @property
+    def simulated(self) -> bool:
+        return False
+
+    def check(self, settings: EnvironmentSettings) -> GateDecision:
+        if not self.enabled:
+            return refusal(
+                GateRefusal.DISABLED,
+                "demo order gate is closed; run with --place-orders to allow orders on a demo "
+                "account. Without it the run only observes.",
+            )
+        if settings.environment is not Environment.DEMO:
+            return refusal(
+                GateRefusal.DEMO_REQUIRED,
+                f"environment is {settings.environment}; this gate opens for DEMO only and "
+                "refuses LIVE outright",
+            )
+        if not settings.allow_order:
+            return refusal(
+                GateRefusal.ALLOW_OPERATION_MISSING,
+                "SOS_ALLOW_ORDER is false; placing orders requires its own opt-in",
+            )
+        if not self.account_confirmed_demo:
+            return refusal(
+                GateRefusal.DEMO_REQUIRED,
+                "the terminal did not confirm this is a demo account; refusing to send orders "
+                "on an account that might be real",
+            )
+        return OPEN
+
+    def require(self, settings: EnvironmentSettings) -> None:
+        self.check(settings).require()
+
+    def __str__(self) -> str:
+        return (
+            f"DemoOrderGate(enabled={self.enabled}, "
+            f"account_confirmed_demo={self.account_confirmed_demo})"
+        )
 
 
 @dataclass(frozen=True, slots=True)
@@ -270,6 +341,11 @@ class SimulatedGate:
     def enabled(self) -> bool:
         """Always true. Satisfies the shared :class:`Gate` protocol so a manager can hold
         either gate, and reported honestly: a simulated venue is never closed."""
+        return True
+
+    @property
+    def simulated(self) -> bool:
+        """A venue that cannot lose money. The only gate a caller may use without settings."""
         return True
 
     def check(self, settings: EnvironmentSettings) -> GateDecision:

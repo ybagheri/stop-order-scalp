@@ -74,7 +74,7 @@ class TestAnUnmeasuredSymbolIsAnError:
 
 class TestTheMeasurementsAreLabelled:
     def test_every_entry_is_keyed_by_a_broker_symbol(self) -> None:
-        assert set(MEASURED_BY_SYMBOL) == {"US30", "DowJones30"}
+        assert set(MEASURED_BY_SYMBOL) == {"US30", "DowJones30", "BITCOIN"}
 
     def test_the_recorded_source_is_present(self) -> None:
         """A measured value without a date and a broker is a rumour."""
