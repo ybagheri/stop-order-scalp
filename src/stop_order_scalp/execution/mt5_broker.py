@@ -204,6 +204,71 @@ def classify(retcode: int, message: str, *, context: str) -> None:
     )
 
 
+#: ``last_error()`` codes that mean the terminal refused the call **before anything left it**:
+#: -2 invalid arguments, -4 not found, -5 invalid version, -6 authorisation, -7 unsupported,
+#: -8 auto-trading disabled. Nothing was sent, so nothing is ambiguous.
+_NOT_SENT_ERRORS: Final[frozenset[int]] = frozenset({-2, -4, -5, -6, -7, -8})
+
+_LAST_ERROR_HINTS: Final[dict[int, str]] = {
+    -2: "the request has an argument of the wrong type or range",
+    -8: "AutoTrading is disabled: press the terminal's 'Algo Trading' button (it must be green)",
+    -6: "the terminal is not authorised on the account",
+}
+
+#: What ``order_check`` answers when the request would be accepted.
+_CHECK_OK: Final[frozenset[int]] = frozenset({0, RETCODE_DONE})
+
+
+def _last_error(api: Any) -> tuple[int, str]:
+    """The terminal's own explanation for a call that returned nothing."""
+    try:
+        code, text = api.last_error()
+        return int(code), str(text)
+    except (AttributeError, TypeError, ValueError):
+        return 0, "last_error() is unavailable"
+
+
+def _check_request(api: Any, request: dict[str, Any], context: str) -> None:
+    """Ask the server whether it would accept ``request``. Sends nothing.
+
+    Any refusal here is a :class:`BrokerRejectedError`, whatever its retcode would have meant
+    from ``order_send``: nothing was transmitted, so there is no ambiguity to preserve, and a
+    plain "no, because ..." is what lets the lifecycle settle the attempt and carry on.
+    """
+    checked = api.order_check(request)
+    if checked is None:
+        code, text = _last_error(api)
+        detail = f"{context}: the terminal could not evaluate the request: error {code} ({text})"
+        if code in _LAST_ERROR_HINTS:
+            detail = f"{detail}; {_LAST_ERROR_HINTS[code]}"
+        raise BrokerRejectedError(f"{detail} -- nothing was sent")
+    code = int(field(checked, "retcode", -1))
+    if code in _CHECK_OK:
+        return
+    message = str(field(checked, "comment", "") or "")
+    try:
+        classify(code, message, context=f"checking {context}")
+    except (BrokerRejectedError, ExecutionUnknownError, RetryableError) as exc:
+        raise BrokerRejectedError(f"{exc} (checked before sending; nothing was sent)") from exc
+
+
+def _dispatch(api: Any, request: dict[str, Any], context: str) -> Any:
+    """``order_send`` once. A ``None`` answer is explained by ``last_error()``, not guessed at."""
+    result = api.order_send(request)
+    if result is not None:
+        return result
+    code, text = _last_error(api)
+    detail = f"{context}: order_send returned nothing; terminal error {code} ({text})"
+    if code in _LAST_ERROR_HINTS:
+        detail = f"{detail}; {_LAST_ERROR_HINTS[code]}"
+    if code in _NOT_SENT_ERRORS:
+        raise BrokerRejectedError(f"{detail} -- refused before it left the terminal; nothing was sent")
+    raise ExecutionUnknownError(
+        f"{detail} -- the terminal cannot say whether the request reached the venue. "
+        "Do NOT resend; re-read broker state for this magic number."
+    )
+
+
 class MetaTrader5Broker:
     """``Broker`` implemented over the native MetaTrader 5 Python API.
 
@@ -439,11 +504,13 @@ class MetaTrader5Broker:
         if intent.expiration is not None:
             request["type_time"] = _const(api, "ORDER_TIME_SPECIFIED", _TIME_SPECIFIED)
             request["expiration"] = int(intent.expiration.timestamp())
-        result = api.order_send(request)
+        context = f"placing {intent.kind} on {intent.symbol}"
+        _check_request(api, request, context)
+        result = _dispatch(api, request, context)
         classify(
             int(field(result, "retcode", -1) or 0),
             str(field(result, "comment", "") or ""),
-            context=f"placing {intent.kind} on {intent.symbol}",
+            context=context,
         )
         ticket = int(field(result, "order", 0) or 0)
         rows = api.orders_get(ticket=ticket) if ticket else None
@@ -462,9 +529,15 @@ class MetaTrader5Broker:
         order book is where the answer lives.
         """
         api = self._api()
-        result = api.order_send(
-            {"action": _const(api, "TRADE_ACTION_REMOVE", _ACTION_REMOVE), "order": ticket}
-        )
+        try:
+            result = _dispatch(
+                api,
+                {"action": _const(api, "TRADE_ACTION_REMOVE", _ACTION_REMOVE), "order": ticket},
+                f"cancelling order {ticket}",
+            )
+        except ExecutionUnknownError:
+            # No answer at all. Whether it reached the venue is exactly what the book says.
+            return not api.orders_get(ticket=ticket)
         retcode = int(field(result, "retcode", -1) or 0)
         if retcode not in _ACCEPTED:
             if retcode in _UNKNOWN:
@@ -511,11 +584,12 @@ class MetaTrader5Broker:
             "sl": level(stop_loss, "sl"),
             "tp": level(take_profit, "tp"),
         }
-        result = api.order_send(request)
+        context = f"modifying position {ticket}"
+        result = _dispatch(api, request, context)
         classify(
             int(field(result, "retcode", -1) or 0),
             str(field(result, "comment", "") or ""),
-            context=f"modifying position {ticket}",
+            context=context,
         )
         return True
 
@@ -583,8 +657,16 @@ _ORDER_TYPE: Final[dict[int, OrderKind]] = {
     _TYPE_SELL: OrderKind.ORDER_KIND_MARKET_SELL,
 }
 
-#: MetaTrader 5 truncates order and position comments at 31 characters.
-_COMMENT_LIMIT: Final[int] = 31
+#: The longest comment this project will send.
+#:
+#: MetaTrader 5's *documentation* says a comment is cut at 31 characters. The Python package does
+#: not cut it: on the first real run a 31-character comment made ``order_check`` and
+#: ``order_send`` fail with ``Invalid "comment" argument`` (``last_error`` -2), while "diag" and an
+#: empty comment were accepted. The true ceiling is somewhere below 31, and it is not yet
+#: measured (``scripts/diagnose_order.py --comment-scan`` measures it). Until it is, 24 keeps the
+#: 20-character identity tag, the separator and three characters of prose -- and the tag is the
+#: only part anything depends on.
+_COMMENT_LIMIT: Final[int] = 24
 
 
 #: A level the terminal reports as ``0`` has no stop or target. NOT "leave unchanged": see
@@ -593,7 +675,7 @@ _UNSET_FLOAT: Final[float] = 0.0
 
 
 def encode_comment(client_tag: str, comment: str) -> str:
-    """Pack the identity tag and the human comment into the terminal's 31-char field.
+    """Pack the identity tag and the human comment into the terminal's short comment field.
 
     MetaTrader 5 has no client-order-id field, so the comment is the only channel by which
     identity survives the round trip -- and identity is what makes "did I already place
