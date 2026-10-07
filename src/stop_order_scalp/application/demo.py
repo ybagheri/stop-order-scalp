@@ -56,7 +56,13 @@ from stop_order_scalp.market_data.timeframes import period_seconds
 from stop_order_scalp.risk.risk_manager import RiskManager
 from stop_order_scalp.strategy.strategy import StopOrderStrategy, StrategyContext
 
-__all__ = ["DemoService", "DemoUnavailable", "build_demo_service", "compare_specifications"]
+__all__ = [
+    "DemoService",
+    "DemoUnavailable",
+    "build_demo_service",
+    "compare_specifications",
+    "price_already_through",
+]
 
 #: A poll that fails this many times in a row ends the run. One failure is a hiccup; thirty
 #: seconds of them is a terminal that is gone, and carrying on would be deciding blind.
@@ -196,6 +202,32 @@ class DemoService:
     def _announce(self) -> None:
         mode = "PLACING ORDERS on the demo account" if self.place_orders else "OBSERVING only"
         self.log(f"demo run: {mode}; symbol {self.symbol}; max orders {self.max_orders}")
+        self._warn_if_offset_is_inside_the_spread()
+
+    def _warn_if_offset_is_inside_the_spread(self) -> None:
+        """Say so up front when the entry offset is smaller than the spread.
+
+        Candles are bid prices and a buy stop triggers on the ask, so a buy stop placed less than
+        one spread above the candle's high is already behind the market whenever price is near
+        that high -- which is exactly when a buy signal exists. The venue refuses it (10015).
+        """
+        try:
+            tick = self.broker.tick(self.symbol)
+        except _TRANSIENT:
+            return
+        if tick is None:
+            return
+        spread_points = tick.spread / self.specification.point
+        offset = self.config.strategy.entry.offset_points
+        if spread_points > offset:
+            message = (
+                f"entry.offset_points is {offset} but the spread is {spread_points:.0f} points. "
+                "A buy stop less than one spread above the candle high is behind the market "
+                "whenever price is near that high, so many buy signals will be skipped. "
+                "Raise the offset to at least the spread, or accept the skips."
+            )
+            self.warnings.append(message)
+            self.log(f"[warning] {message}")
 
     # --- one poll ---------------------------------------------------------
 
@@ -257,6 +289,17 @@ class DemoService:
 
     def _act(self, decision: Any, plan: Any, why: str) -> bool:
         """Offer the decision to the lifecycle, within the order limit."""
+        if plan is not None:
+            behind = price_already_through(
+                plan, self.broker.tick(self.symbol), self.specification
+            )
+            if behind is not None:
+                # The breakout this stop was meant to catch has already happened, or the offset
+                # is inside the spread. Sending it would only be refused, so say why and move on;
+                # nothing is placed, nothing is cancelled, and it is not a rejection.
+                self._event("skipped", behind)
+                self._manage()
+                return True
         self._bind_market()
         offered: Any = plan if plan is not None else decision
         if plan is not None and self.orders_placed >= self.max_orders:
@@ -373,6 +416,33 @@ class DemoService:
                 else "Orders were sent to the demo account. Check them in the terminal."
             ),
         }
+
+
+def price_already_through(
+    plan: Any, tick: Tick | None, specification: SymbolSpecification
+) -> str | None:
+    """Why a stop order cannot be placed at its level right now, or ``None`` if it can.
+
+    A buy stop must rest above the ask and a sell stop below the bid, by at least the symbol's
+    minimum stop distance; otherwise the venue answers ``10015 Invalid price``. Asking first
+    turns a refusal into an explanation, and keeps it out of the rejection count that ends a run.
+    """
+    if tick is None:
+        return None
+    distance = specification.points_to_price(specification.stops_level)
+    entry = plan.entry.value
+    if plan.side is Side.SIDE_BUY:
+        if entry <= tick.ask.value + distance:
+            return (
+                f"price already through the entry: buy stop at {entry} is not above the ask "
+                f"{tick.ask} (spread {tick.spread}); a stop cannot rest behind the market"
+            )
+    elif entry >= tick.bid.value - distance:
+        return (
+            f"price already through the entry: sell stop at {entry} is not below the bid "
+            f"{tick.bid} (spread {tick.spread}); a stop cannot rest behind the market"
+        )
+    return None
 
 
 def _describe(plan: Any) -> str:

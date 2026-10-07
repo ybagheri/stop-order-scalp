@@ -167,7 +167,8 @@ the strategy has: 123, 124. Trades opened by hand are never touched.
 | --- | --- | --- |
 | `[rejected] ... 10027 ... Algo Trading` | دکمه‌ی *Algo Trading* ترمینال خاموش است | روشنش کنید؛ باید سبز باشد |
 | `[rejected] ... 10030` | نماد آن حالت filling را نمی‌پذیرد | `order.filling_policy` را `IOC` یا `FOK` کنید |
-| `[rejected] ... 10015 Invalid price` | قیمت قبل از ارسال از سطح ورود رد شد | عادی است؛ کندل بعد دوباره تلاش می‌کند |
+| `[skipped] price already through the entry` | یک stop نمی‌تواند پشت بازار بنشیند (بخش «آفست و اسپرد») | عادی است؛ چیزی ارسال نشد؛ کندل بعد دوباره تصمیم می‌گیرد |
+| `[rejected] ... 10015 Invalid price` | قیمت بین بررسی و ارسال از سطح ورود رد شد | نادر است؛ کندل بعد دوباره تلاش می‌کند |
 | `[rejected] ... 10018` | بازار بسته است | صبر کنید یا نماد ۲۴ ساعته بگذارید |
 | `Invalid "comment" argument` | کامنت سفارش از حد ترمینال بلندتر است | حل شده (حد ۲۴)؛ اگر تکرار شد گزارش دهید |
 | `[waiting] no newly closed M1 candle` | بازار بسته است یا ترمینال کندل را منتشر نکرده | چیزی برای درست کردن نیست |
@@ -182,6 +183,29 @@ the strategy has: 123, 124. Trades opened by hand are never touched.
 python scripts/preflight_mt5.py --symbol BITCOIN             # پکیج، کلیدها، نماد
 python scripts/diagnose_order.py --symbol BITCOIN --matrix   # این سفارش را می‌پذیرد؟ اگر نه چرا؟
 ```
+
+### آفست و اسپرد
+
+سطح ورود برای خرید برابر `high کندل + entry.offset_points` و برای فروش `low کندل - offset_points`
+است. کندل‌ها قیمت **bid** هستند، ولی Buy Stop با **ask** فعال می‌شود که یک اسپرد بالاتر است. اسپرد
+اندازه‌گیری‌شده‌ی Alpari برای US30 برابر **۱۸ پوینت** (۱.۸) و آفست پیش‌فرض **۱۰** (۱.۰) است. پس هر
+وقت قیمت در ۰.۸ واحدی high کندل باشد، Buy Stop *پشت ask* می‌نشیند و ترمینال آن را رد می‌کند
+(`10015`). دقیقاً همان لحظه‌ای است که سیگنال خرید وجود دارد، پس روی این نماد **خیلی از سیگنال‌های
+خرید رد می‌شوند** و اجرا هم همین را می‌گوید:
+
+```
+[warning] entry.offset_points is 10 but the spread is 18 points. A buy stop less than one spread
+          above the candle high is behind the market whenever price is near that high ...
+[skipped] price already through the entry: buy stop at 51233.0 is not above the ask 51233.5
+```
+
+skip شکست نیست: چیزی ارسال یا لغو نمی‌شود و جزو سه رد شدنی که اجرا را متوقف می‌کند حساب نمی‌شود.
+فروش کمتر درگیر است، چون Sell Stop زیر bid می‌نشیند.
+
+دو راه صادقانه هست: skip‌ها را بپذیرید، یا `entry.offset_points` را دست‌کم برابر اسپرد کنید (روی
+US30 عدد ۳۰ یعنی ۳.۰). بالا بردن آن **خود استراتژی را عوض می‌کند**: ورود از کندل دورتر است و معامله،
+معامله‌ی دیگری است. عمداً تصمیم بگیرید و قبل از باور کردن نتیجه، بک‌تست را با `--spread-points 18`
+دوباره اجرا کنید.
 
 ## ۷. حجم معامله چقدر است؟
 
