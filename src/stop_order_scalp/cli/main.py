@@ -190,6 +190,38 @@ def build_parser() -> argparse.ArgumentParser:
     subparsers.add_parser("journal", parents=[common], help="print the trade journal")
     subparsers.add_parser("diagnostics", parents=[common], help="print an environment and configuration bundle")
 
+    subparsers.add_parser(
+        "book",
+        parents=[common],
+        help="DEMO: list this strategy's resting orders and open positions (reads only)",
+    )
+    history = subparsers.add_parser(
+        "history",
+        parents=[common],
+        help="DEMO: closed trades of this strategy, how each ended, and the net result (reads only)",
+    )
+    history.add_argument("--days", type=int, default=7, help="how many days back (default 7)")
+    cancel = subparsers.add_parser(
+        "cancel",
+        parents=[common],
+        help="DEMO: remove resting orders. Previews unless --yes",
+    )
+    cancel.add_argument("--ticket", type=int, default=None, help="one order (default: all of the strategy's)")
+    cancel.add_argument("--yes", action="store_true", help="actually do it; without this nothing is sent")
+    close = subparsers.add_parser(
+        "close",
+        parents=[common],
+        help="DEMO: close open positions at market. Previews unless --yes",
+    )
+    close.add_argument("--ticket", type=int, default=None, help="one position (default: all of the strategy's)")
+    close.add_argument("--yes", action="store_true", help="actually do it; without this nothing is sent")
+    flatten = subparsers.add_parser(
+        "flatten",
+        parents=[common],
+        help="DEMO: cancel every order, then close every position. Previews unless --yes",
+    )
+    flatten.add_argument("--yes", action="store_true", help="actually do it; without this nothing is sent")
+
     backtest = subparsers.add_parser("backtest", parents=[common], help="replay historical candles")
     backtest.add_argument("--data", type=Path, default=None, metavar="PATH", help="candle file (JSON or CSV)")
     backtest.add_argument("--symbol", default=None, help="override the configured symbol")
@@ -329,6 +361,45 @@ def _cmd_demo(args: argparse.Namespace, config: AppConfig, out: TextIO, err: Tex
     return EXIT_OK
 
 
+def _operator(config: AppConfig, err: TextIO) -> Any:
+    """The operator service, or ``None`` after reporting why it cannot start."""
+    build_operator = _resolve("stop_order_scalp.application.operator", "build_operator")
+    OperatorUnavailable = _resolve("stop_order_scalp.application.operator", "OperatorUnavailable")
+
+    def log(line: str) -> None:
+        err.write(line + "\n")
+        err.flush()
+
+    try:
+        return build_operator(config, log=log), OperatorUnavailable
+    except OperatorUnavailable as exc:
+        _fail(err, EXIT_UNAVAILABLE, str(exc))
+        return None, OperatorUnavailable
+
+
+def _cmd_operator(args: argparse.Namespace, config: AppConfig, out: TextIO, err: TextIO) -> int:
+    """``book``, ``cancel``, ``close`` and ``flatten`` share one setup and one failure path."""
+    service, unavailable = _operator(config, err)
+    if service is None:
+        return EXIT_UNAVAILABLE
+    try:
+        if args.command == "book":
+            report = service.book()
+        elif args.command == "history":
+            report = service.history(days=args.days)
+        elif args.command == "cancel":
+            report = service.cancel(ticket=args.ticket, confirm=args.yes)
+        elif args.command == "close":
+            report = service.close(ticket=args.ticket, confirm=args.yes)
+        else:
+            report = service.flatten(confirm=args.yes)
+    except unavailable as exc:
+        _fail(err, EXIT_UNAVAILABLE, str(exc))
+        return EXIT_UNAVAILABLE
+    _emit(out, {"command": args.command, **report})
+    return EXIT_OK
+
+
 def _cmd_run(args: argparse.Namespace, config: AppConfig, out: TextIO, err: TextIO) -> int:
     if args.demo:
         return _cmd_demo(args, config, out, err)
@@ -387,8 +458,7 @@ def _cmd_journal(args: argparse.Namespace, config: AppConfig, out: TextIO, err: 
     # **Scoped to the environment**, and the path is reported. `state/state.json` is the LIVE
     # ledger; a dry run's intents are not in it, and a journal that silently showed nothing
     # would read as "no trades" rather than as "you are looking at the wrong file".
-    environment = _resolve("stop_order_scalp.domain.enums", "Environment")
-    state_path = config.paths.state_file_for(environment.DRY_RUN)
+    state_path = config.paths.state_file_for(config.environment.environment)
     with ledger_type.load(state_path) as ledger:
         entries = ledger.journal(limit=config.state.journal_limit)
         _emit(
@@ -398,10 +468,12 @@ def _cmd_journal(args: argparse.Namespace, config: AppConfig, out: TextIO, err: 
                 "exists": state_path.exists(),
                 "count": len(entries),
                 "entries": entries,
+                "environment": str(config.environment.environment),
                 "note": (
-                    "A default dry run keeps its ledger in memory and writes nothing, so this "
-                    "is empty by design. Point state.path in config/default.yaml at a file to "
-                    "persist a dry run's intents, or read the LIVE ledger at state/state.json."
+                    "The ledger of the configured environment (SOS_ENVIRONMENT). It records "
+                    "what the strategy decided and sent, not profit and loss: for results, run "
+                    "`history`. A default dry run keeps its ledger in memory and writes nothing, "
+                    "so it is empty by design."
                 ),
             },
         )
@@ -434,6 +506,11 @@ _HANDLERS: Final[dict[str, Handler]] = {
     "journal": _cmd_journal,
     "diagnostics": _cmd_diagnostics,
     "backtest": _cmd_backtest,
+    "book": _cmd_operator,
+    "history": _cmd_operator,
+    "cancel": _cmd_operator,
+    "close": _cmd_operator,
+    "flatten": _cmd_operator,
 }
 
 

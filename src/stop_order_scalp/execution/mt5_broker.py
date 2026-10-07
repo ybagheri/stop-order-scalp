@@ -204,6 +204,20 @@ def classify(retcode: int, message: str, *, context: str) -> None:
     )
 
 
+#: ``DEAL_ENTRY_*``: whether a deal opened a position, closed one, or both.
+_DEAL_ENTRY: Final[dict[int, str]] = {0: "open", 1: "close", 2: "reverse", 3: "close"}
+
+#: ``DEAL_REASON_*``: what caused a deal. This is how a closed trade says how it ended.
+_DEAL_REASON: Final[dict[int, str]] = {
+    0: "manual",
+    1: "manual",
+    2: "manual",
+    3: "program",
+    4: "stop_loss",
+    5: "take_profit",
+    6: "stop_out",
+}
+
 #: ``last_error()`` codes that mean the terminal refused the call **before anything left it**:
 #: -2 invalid arguments, -4 not found, -5 invalid version, -6 authorisation, -7 unsupported,
 #: -8 auto-trading disabled. Nothing was sent, so nothing is ambiguous.
@@ -280,7 +294,7 @@ class MetaTrader5Broker:
     stored on this object. ``EnvironmentSettings`` holds only a presence flag, by design.
     """
 
-    __slots__ = ("_connected", "_filling", "_module", "_settings")
+    __slots__ = ("_connected", "_deviation", "_filling", "_module", "_settings")
 
     def __init__(
         self,
@@ -288,6 +302,7 @@ class MetaTrader5Broker:
         settings: EnvironmentSettings | None = None,
         *,
         filling: str = "RETURN",
+        deviation_points: int = 200,
     ) -> None:
         if filling not in _FILLING_VALUES:
             raise BrokerError(f"filling must be one of {sorted(_FILLING_VALUES)}, got {filling!r}")
@@ -297,6 +312,8 @@ class MetaTrader5Broker:
         #: brokers accept for a stop order. Which one a symbol allows is the broker's choice;
         #: a refusal (retcode 10030) says so, and ``order.filling_policy`` is the setting.
         self._filling = filling
+        #: Slippage tolerated when closing at market, in points of the symbol.
+        self._deviation = deviation_points
         self._connected = False
 
     # --- connection ------------------------------------------------------
@@ -551,6 +568,113 @@ class MetaTrader5Broker:
                     context=f"cancelling order {ticket}",
                 )
         return not api.orders_get(ticket=ticket)
+
+    def deals(
+        self, *, days: int = 7, magic_number: int | None = None, symbol: str | None = None
+    ) -> list[dict[str, Any]]:
+        """Executed buy/sell deals of the last ``days`` days, oldest first.
+
+        This is where the result of a trade lives: a position that has closed is gone from
+        ``positions()``, and its profit, its commission and *why it closed* -- stop-loss,
+        take-profit, or someone pressing close -- are only in the deal history.
+        """
+        api = self._api()
+        now = server_seconds(api, symbol or (self._settings.symbol if self._settings else None))
+        if not now:
+            raise BrokerNotConnectedError("the terminal reported no server time for the history")
+        rows = api.history_deals_get(
+            epoch_to_datetime(now - days * 86400), epoch_to_datetime(now + 86400)
+        )
+        found: list[dict[str, Any]] = []
+        for row in rows or ():
+            kind = int(field(row, "type", -1) or 0)
+            if kind not in (0, 1):  # balance, credit and similar are not trades
+                continue
+            if magic_number is not None and int(field(row, "magic", 0) or 0) != magic_number:
+                continue
+            if symbol is not None and str(field(row, "symbol", "")) != symbol:
+                continue
+            found.append(
+                {
+                    "ticket": int(field(row, "ticket", 0) or 0),
+                    "position": int(field(row, "position_id", 0) or 0),
+                    "time": epoch_to_datetime(int(field(row, "time", 0) or 0)).isoformat(),
+                    "side": "BUY" if kind == 0 else "SELL",
+                    "leg": _DEAL_ENTRY.get(int(field(row, "entry", -1) or 0), "other"),
+                    "volume": float(field(row, "volume", 0.0) or 0.0),
+                    "price": float(field(row, "price", 0.0) or 0.0),
+                    "profit": float(field(row, "profit", 0.0) or 0.0),
+                    "commission": float(field(row, "commission", 0.0) or 0.0),
+                    "swap": float(field(row, "swap", 0.0) or 0.0),
+                    "reason": _DEAL_REASON.get(int(field(row, "reason", -1) or 0), "other"),
+                    "comment": str(field(row, "comment", "") or ""),
+                }
+            )
+        found.sort(key=lambda deal: (deal["time"], deal["ticket"]))
+        return found
+
+    def close_position(self, ticket: int) -> bool:
+        """Close one position at market. ``True`` when the terminal accepted the close.
+
+        A *market* order, so unlike a pending one it needs a filling mode the symbol allows for
+        market execution -- which on the first real terminal was FOK only, while pending orders
+        took RETURN. The mode is therefore read from the symbol, not from ``order.filling_policy``.
+
+        Never retried: if the answer is ambiguous the position may or may not be closed, and a
+        second close request on a position that *did* close would be refused, but one on a
+        position that was *reopened* by something else would not. The caller re-reads the book.
+        """
+        api = self._api()
+        rows = api.positions_get(ticket=ticket)
+        row = rows[0] if rows else None
+        if row is None:
+            raise BrokerRejectedError(
+                f"closing position {ticket}: no open position with that ticket"
+            )
+        symbol = str(field(row, "symbol", ""))
+        is_long = int(field(row, "type", 0) or 0) == 0
+        tick = api.symbol_info_tick(symbol)
+        if tick is None:
+            raise BrokerNotConnectedError(f"closing position {ticket}: no price for {symbol}")
+        # A long is closed by selling at the bid; a short by buying at the ask.
+        price = float(field(tick, "bid" if is_long else "ask"))
+        request: dict[str, Any] = {
+            "action": _const(api, "TRADE_ACTION_DEAL", _ACTION_DEAL),
+            "symbol": symbol,
+            "volume": float(field(row, "volume")),
+            "type": _const(
+                api,
+                "ORDER_TYPE_SELL" if is_long else "ORDER_TYPE_BUY",
+                1 if is_long else 0,
+            ),
+            "position": ticket,
+            "price": price,
+            "deviation": self._deviation,
+            "magic": int(field(row, "magic", 0) or 0),
+            "comment": "SOS close",
+            "type_time": _const(api, "ORDER_TIME_GTC", _TIME_GTC),
+            "type_filling": self._market_filling(api, symbol),
+        }
+        context = f"closing position {ticket}"
+        _check_request(api, request, context)
+        result = _dispatch(api, request, context)
+        classify(
+            int(field(result, "retcode", -1) or 0),
+            str(field(result, "comment", "") or ""),
+            context=context,
+        )
+        return True
+
+    @staticmethod
+    def _market_filling(api: Any, symbol: str) -> int:
+        """A filling mode the symbol allows for a market order: FOK, else IOC, else RETURN."""
+        info = api.symbol_info(symbol)
+        flags = int(field(info, "filling_mode", 0) or 0) if info is not None else 0
+        if flags & 1:
+            return _const(api, "ORDER_FILLING_FOK", _FILLING_VALUES["FOK"])
+        if flags & 2:
+            return _const(api, "ORDER_FILLING_IOC", _FILLING_VALUES["IOC"])
+        return _const(api, "ORDER_FILLING_RETURN", _FILLING_VALUES["RETURN"])
 
     def modify_position(
         self, ticket: int, *, stop_loss: Any = None, take_profit: Any = None

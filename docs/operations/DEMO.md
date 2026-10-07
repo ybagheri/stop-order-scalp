@@ -1,5 +1,9 @@
 # Trading on a demo account
 
+> Looking for how to **close** a trade, cancel an order, or read the result? That is
+> [`TRADING_GUIDE.md`](TRADING_GUIDE.md) (Persian: [`TRADING_GUIDE.fa.md`](TRADING_GUIDE.fa.md)).
+> This page is the setup and the first run.
+
 `run --dry-run` proves the pipeline against a simulator. This is the step after it: the same
 pipeline reading the **real market** from your MetaTrader 5 terminal and, only if you ask,
 sending **real orders to a demo account**.
@@ -48,7 +52,8 @@ which is correct.
 
 ## Step 2 -- one order
 
-In `.env`: `SOS_ALLOW_ORDER=true`. Then:
+In `.env`: `SOS_ALLOW_ORDER=true`. (Closing a position by command is a separate switch,
+`SOS_ALLOW_CLOSE`; see the trading guide. Leave it `false` until you need it.) Then:
 
 ```bash
 python -m stop_order_scalp run --demo --place-orders --max-orders 1 --duration 300
@@ -86,4 +91,6 @@ fills, break-even and trailing move the stop; the take-profit is left alone.
 ## Read the ledger
 
 The demo ledger is `state/state-demo.json`, separate from the simulator's and from the live one.
-`python -m stop_order_scalp journal` reads it.
+`python -m stop_order_scalp journal` reads the ledger of the configured environment (it used to
+read the dry-run ledger whatever the environment was, so it showed nothing for a demo run). It
+records what the strategy decided and sent, not profit and loss: for results use `history`.

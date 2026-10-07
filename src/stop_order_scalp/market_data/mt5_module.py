@@ -139,8 +139,20 @@ class MT5Api(Protocol):
     # keep honest. Every call below goes through a keyword argument because that is how the
     # real package takes them, so a positional mistake fails type checking here.
 
+    def history_deals_get(self, date_from: Any, date_to: Any) -> Any:
+        """Executed deals between two datetimes, or ``None``."""
+
+    def order_check(self, request: dict[str, Any]) -> Any:
+        """Validate a trade request against the server's rules **without sending it**.
+
+        Returns a result with ``retcode`` (``0`` when the request would be accepted) and a
+        ``comment`` giving the reason when it would not -- margin, price, volume, stops, filling
+        mode. ``None`` if the request is malformed, with the cause in ``last_error()``.
+        """
+
     def order_send(self, request: dict[str, Any]) -> Any:
-        """Send a trade request. Returns a result row carrying ``retcode``."""
+        """Send a trade request. Returns a result row carrying ``retcode``, or ``None`` on a
+        malformed request or a dead terminal, with the cause in ``last_error()``."""
 
     def orders_get(self, *, symbol: str | None = ..., ticket: int | None = ...) -> Any:
         """Working orders, optionally for one symbol or one ticket.

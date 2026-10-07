@@ -64,6 +64,7 @@
 | [`docs/mt5/`](docs/mt5/) | راه‌اندازی MT5، مشخصات نماد، حالت خشک |
 | [`docs/testing/`](docs/testing/) | ساختار تست‌ها، تست ویژگی‌ها، اجرا |
 | [`docs/operations/`](docs/operations/) | استقرار، عیب‌یابی، بازیابی |
+| [`docs/operations/TRADING_GUIDE.fa.md`](docs/operations/TRADING_GUIDE.fa.md) | **باز و بسته کردن معامله در حساب دمو** |
 | [`docs/operations/RUNNING.md`](docs/operations/RUNNING.md) | **راهنمای اجرا و تفسیر خروجی** |
 | [`docs/backtest/`](docs/backtest/) | **اجرای بک‌تست، و اینکه اعداد چه چیزی نمی‌گویند** |
 | [`docs/research/`](docs/research/) | لایه پژوهشی اختیاری و به‌طور پیش‌فرض غیرفعال |

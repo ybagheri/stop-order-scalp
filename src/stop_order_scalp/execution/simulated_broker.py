@@ -557,6 +557,11 @@ class SimulatedBroker:
             position.take_profit = _as_price(take_profit)
         return True
 
+    def close_position(self, ticket: int) -> bool:
+        """The operator-facing close, same name as the real broker's. Closes at the quote."""
+        self.close(ticket)
+        return True
+
     def close(self, ticket: int, *, at: Decimal | None = None) -> Money:
         """Close a position at the venue's price and return the realised P&L.
 

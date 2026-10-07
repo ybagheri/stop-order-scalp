@@ -169,6 +169,14 @@ class FakeTerminal:
             return None
         return SimpleNamespace(**{**self.tick_row, "time": self.server_time})
 
+    def history_deals_get(self, date_from: Any, date_to: Any) -> Any:
+        del date_from, date_to
+        return ()
+
+    def order_check(self, request: dict[str, Any]) -> Any:
+        del request
+        return SimpleNamespace(retcode=0, comment="Done")
+
     def order_send(self, request: dict[str, Any]) -> Any:
         self.sent.append(dict(request))
         if self.send_retcode:

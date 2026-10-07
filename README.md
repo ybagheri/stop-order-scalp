@@ -112,6 +112,22 @@ python -m stop_order_scalp journal            # trade journal
 python -m stop_order_scalp diagnostics        # environment + config bundle
 ```
 
+On a **demo account** (terminal signed in, `SOS_ENVIRONMENT=DEMO`):
+
+```bash
+python -m stop_order_scalp run --demo                      # real market, observe only
+python -m stop_order_scalp run --demo --place-orders       # real orders, demo account only
+python -m stop_order_scalp book                            # what the strategy has on the account
+python -m stop_order_scalp history --days 7                # how closed trades ended, net result
+python -m stop_order_scalp cancel [--ticket N] [--yes]     # remove resting orders (preview without --yes)
+python -m stop_order_scalp close  [--ticket N] [--yes]     # close positions at market
+python -m stop_order_scalp flatten [--yes]                 # cancel everything, then close everything
+```
+
+How a trade opens and closes, and what to type to stop one:
+[`docs/operations/TRADING_GUIDE.md`](docs/operations/TRADING_GUIDE.md) ·
+[فارسی](docs/operations/TRADING_GUIDE.fa.md).
+
 Execution modes (`SOS_ENVIRONMENT`): `DRY_RUN` (default) → `PAPER` → `DEMO` → `LIVE`.
 Each account-changing operation has its **own** opt-in switch, and `LIVE` additionally
 requires `SOS_ALLOW_LIVE=true`. There is no path that reaches live trading by accident.

@@ -74,3 +74,32 @@ def test_a_closed_gate_also_stops_a_cancel(tmp_path: Path) -> None:
 
     assert step.actions == ("gate_refused",)
     assert broker.cancels == []
+
+
+class TestARejectionIsSettledNotRaised:
+    def test_it_is_recorded_and_the_machine_is_free_for_the_next_plan(self, tmp_path: Path) -> None:
+        from stop_order_scalp.domain.exceptions import BrokerRejectedError
+        from stop_order_scalp.infrastructure.persistence import IntentOutcome
+
+        from .test_trade_lifecycle import _tag_of
+
+        broker = FakeBroker()
+        broker.send_error = BrokerRejectedError("retcode 10015 (Invalid price)")
+        ledger_path = tmp_path / "s.json"
+        lifecycle = TradeLifecycle(
+            broker,
+            StateLedger.load(ledger_path),
+            FakeOrderManager(),
+            clock=FixedClock(NOW),
+            magic_number=MAGIC,
+            symbol="US30",
+        )
+
+        step = lifecycle.tick(plan())
+
+        assert step.actions == ("rejected",)
+        assert any("10015" in note for note in step.notes)
+        entry = StateLedger.load(ledger_path).get(_tag_of(plan()))
+        assert entry is not None
+        assert entry.outcome == IntentOutcome.REJECTED
+        assert lifecycle.state.name.endswith("WAITING_FOR_SIGNAL")

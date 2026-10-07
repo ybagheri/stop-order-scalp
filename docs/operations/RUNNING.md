@@ -130,6 +130,8 @@ ignored is the most expensive kind of configuration bug there is.
 | `run --live` | exit 4, with the reason: every wire value and retcode here is still unverified against a real terminal |
 | `run --demo` | real market data from the terminal, **observing only** -- see [DEMO.md](DEMO.md) |
 | `run --demo --place-orders` | sends orders to a **demo** account, behind four independent switches -- see [DEMO.md](DEMO.md) |
+| `book`, `history` | read-only views of a demo account -- see [TRADING_GUIDE.md](TRADING_GUIDE.md) |
+| `cancel`, `close`, `flatten` | act on a demo account, **preview unless `--yes`**, own switches -- see [TRADING_GUIDE.md](TRADING_GUIDE.md) |
 | `run` in any other mode | runs against the simulator, never a broker |
 
 `LIVE` needs three independent switches — `SOS_ENVIRONMENT=LIVE`, `SOS_ALLOW_LIVE=true` and

@@ -678,6 +678,13 @@ take profit.
 
 ## Phase 11 — Demo Validation — `in progress`
 
+> **Status after first contact with a real terminal:** `run --demo` and the operator commands
+> (`book`, `history`, `cancel`, `close`, `flatten`) exist and are tested against a terminal double
+> that exposes only real `MetaTrader5` functions. A pending order has been *attempted* once and
+> failed on a comment-length limit the documentation had wrong (fixed). **Not yet observed:** a
+> fill, trailing, a close, recovery after a real interruption. Phase 11 is done when one full
+> open-manage-close cycle has been watched on a demo terminal. See `HANDOFF.md`.
+
 The specification is **measured**. The account is **not currently valid**. Both matter more
 than the phase label.
 

@@ -34,7 +34,7 @@ from stop_order_scalp.market_data.symbols import MEASURED_BITCOIN, us30_specific
 REPO = Path(__file__).resolve().parents[2]
 
 # Published MetaTrader5 constants.
-ACTION_PENDING, ACTION_SLTP, ACTION_REMOVE = 5, 6, 8
+ACTION_DEAL, ACTION_PENDING, ACTION_SLTP, ACTION_REMOVE = 1, 5, 6, 8
 TYPE_BUY_STOP = 4
 
 #: The "server" clock. Deliberately nowhere near the machine's own UTC: rates carry server time,
@@ -60,6 +60,16 @@ class FakeTerminal:
         self.initialized_with: dict[str, Any] | None = None
         self.m1 = self._bars()
         self._ticket = 9000
+        #: When set, a pending order is answered with this retcode and nothing is booked.
+        self.pending_retcode: int | None = None
+        #: ``order_check`` refuses with this retcode, or cannot evaluate when ``check_none``.
+        self.check_retcode = 0
+        self.check_none = False
+        #: ``order_send`` returns nothing, with ``last_error`` holding the cause.
+        self.send_none = False
+        self.last_error_pair: tuple[int, str] = (0, "")
+        self.checked: list[dict[str, Any]] = []
+        self.deal_rows: list[dict[str, Any]] = []
 
     # --- market ----------------------------------------------------------
 
@@ -133,6 +143,7 @@ class FakeTerminal:
             volume_step=0.01,
             trade_stops_level=0,
             trade_freeze_level=0,
+            filling_mode=1,
             currency="USD",
             leverage=100,
         )
@@ -151,7 +162,7 @@ class FakeTerminal:
         return None
 
     def last_error(self) -> tuple[int, str]:
-        return (0, "")
+        return self.last_error_pair
 
     def account_info(self) -> Any:
         return SimpleNamespace(
@@ -169,9 +180,32 @@ class FakeTerminal:
 
     # --- trading ---------------------------------------------------------
 
+    def history_deals_get(self, date_from: Any, date_to: Any) -> Any:
+        del date_from, date_to
+        return tuple(SimpleNamespace(**r) for r in self.deal_rows)
+
+    def order_check(self, request: dict[str, Any]) -> Any:
+        self.checked.append(dict(request))
+        if len(request.get("comment", "")) >= 31:
+            # Measured on a real terminal: a 31-character comment is refused, not truncated.
+            self.last_error_pair = (-2, 'Invalid "comment" argument')
+            return None
+        if self.check_none:
+            return None
+        return SimpleNamespace(retcode=self.check_retcode, comment="Done" if not self.check_retcode else "refused")
+
     def order_send(self, request: dict[str, Any]) -> Any:
         self.sent.append(dict(request))
+        if self.send_none:
+            return None
         action = request.get("action")
+        if action == ACTION_PENDING and self.pending_retcode is not None:
+            comments = {10027: "AutoTrading disabled by client", 10030: "Unsupported filling mode"}
+            return SimpleNamespace(
+                retcode=self.pending_retcode,
+                order=0,
+                comment=comments.get(self.pending_retcode, "refused"),
+            )
         if action == ACTION_PENDING:
             self._ticket += 1
             self.order_rows.append(
@@ -190,6 +224,11 @@ class FakeTerminal:
                 }
             )
             return SimpleNamespace(retcode=10008, order=self._ticket, comment="placed")
+        if action == ACTION_DEAL and "position" in request:
+            self.position_rows = [
+                r for r in self.position_rows if r["ticket"] != request["position"]
+            ]
+            return SimpleNamespace(retcode=10009, order=0, comment="closed")
         if action == ACTION_REMOVE:
             self.order_rows = [r for r in self.order_rows if r["ticket"] != request["order"]]
             return SimpleNamespace(retcode=10009, order=request["order"], comment="removed")
@@ -615,3 +654,139 @@ class TestAFilledPositionIsManaged:
             "a modify must not remove the take-profit"
         )
         assert modifies[-1]["sl"] > original_sl
+
+
+# =============================================================================
+# A refusal is an outcome, not a crash
+# =============================================================================
+
+
+class TestARejectedOrder:
+    @staticmethod
+    def _service(config: AppConfig, terminal: FakeTerminal, retcode: int, **kwargs: Any) -> Any:
+        terminal.pending_retcode = retcode
+        holder = MT5Module()
+        holder._module = terminal  # type: ignore[assignment]
+        return build_demo_service(
+            config, place_orders=True, module=holder, log=lambda _l: None, **kwargs
+        )
+
+    def test_autotrading_off_is_reported_with_the_fix_and_does_not_crash(
+        self, config: AppConfig, terminal: FakeTerminal
+    ) -> None:
+        service = self._service(config, terminal, 10027)
+
+        report = service.run(max_polls=1, sleep=_no_sleep)
+
+        rejected = [e for e in report["events"] if e["kind"] == "rejected"]
+        assert len(rejected) == 1
+        assert "10027" in rejected[0]["detail"]
+        assert "Algo Trading" in rejected[0]["detail"], "the operator is told what to press"
+        assert report["orders_placed"] == 0
+        assert report["rejections"] == 1
+
+    def test_an_unsupported_filling_mode_names_the_setting(
+        self, config: AppConfig, terminal: FakeTerminal
+    ) -> None:
+        service = self._service(config, terminal, 10030)
+
+        report = service.run(max_polls=1, sleep=_no_sleep)
+
+        detail = next(e["detail"] for e in report["events"] if e["kind"] == "rejected")
+        assert "filling_policy" in detail
+
+    def test_the_run_stops_after_repeated_rejections_instead_of_hammering_the_server(
+        self, config: AppConfig, terminal: FakeTerminal
+    ) -> None:
+        service = self._service(config, terminal, 10027)
+
+        report = service.run(max_polls=50, sleep=lambda _s: terminal.next_minute())
+
+        assert report["stop_reason"] == "rejected_repeatedly"
+        assert terminal.sent_actions().count(ACTION_PENDING) == 3
+
+    def test_a_rejection_leaves_nothing_on_the_book_and_the_machine_ready(
+        self, config: AppConfig, terminal: FakeTerminal
+    ) -> None:
+        service = self._service(config, terminal, 10027)
+
+        service.run(max_polls=1, sleep=_no_sleep)
+
+        assert terminal.order_rows == []
+        assert str(service.lifecycle.state).endswith("waiting_for_signal")
+
+    def test_after_a_transient_rejection_the_next_candle_can_place(
+        self, config: AppConfig, terminal: FakeTerminal
+    ) -> None:
+        service = self._service(config, terminal, 10015)  # invalid price: it moved
+
+        service.run(max_polls=1, sleep=_no_sleep)
+        terminal.pending_retcode = None
+        terminal.next_minute()
+        report = service.run(max_polls=1, sleep=_no_sleep)
+
+        assert report["orders_placed"] == 1
+
+
+class TestAnUnknownOutcomeStopsTheRun:
+    """The real first run met ``retcode -1 ()`` and carried on polling for 37 cycles."""
+
+    def test_an_ipc_failure_ends_the_run_with_a_warning_to_look_at_the_terminal(
+        self, config: AppConfig, terminal: FakeTerminal
+    ) -> None:
+        terminal.send_none = True
+        terminal.last_error_pair = (-10001, "Internal IPC send failed")
+        holder = MT5Module()
+        holder._module = terminal  # type: ignore[assignment]
+        service = build_demo_service(config, place_orders=True, module=holder, log=lambda _l: None)
+
+        report = service.run(max_polls=50, sleep=_no_sleep)
+
+        assert report["stop_reason"] == "execution_unknown"
+        assert terminal.sent_actions().count(ACTION_PENDING) == 1, "it must not resend"
+        assert any("UNKNOWN" in w for w in report["warnings"])
+
+    def test_auto_trading_disabled_is_a_refusal_not_an_unknown(
+        self, config: AppConfig, terminal: FakeTerminal
+    ) -> None:
+        terminal.send_none = True
+        terminal.last_error_pair = (-8, "Auto-trading disabled")
+        holder = MT5Module()
+        holder._module = terminal  # type: ignore[assignment]
+        service = build_demo_service(config, place_orders=True, module=holder, log=lambda _l: None)
+
+        report = service.run(max_polls=1, sleep=_no_sleep)
+
+        assert report["stop_reason"] != "execution_unknown"
+        assert report["rejections"] == 1
+        detail = next(e["detail"] for e in report["events"] if e["kind"] == "rejected")
+        assert "Algo Trading" in detail
+
+    def test_the_order_check_refusal_reaches_the_operator_in_plain_words(
+        self, config: AppConfig, terminal: FakeTerminal
+    ) -> None:
+        terminal.check_retcode = 10016
+        holder = MT5Module()
+        holder._module = terminal  # type: ignore[assignment]
+        service = build_demo_service(config, place_orders=True, module=holder, log=lambda _l: None)
+
+        report = service.run(max_polls=1, sleep=_no_sleep)
+
+        assert terminal.sent == [], "a refused check must send nothing"
+        assert report["rejections"] == 1
+
+
+class TestTheFirstRealOrderRegression:
+    def test_the_comment_the_project_sends_is_short_enough_for_the_real_terminal(
+        self, config: AppConfig, module: MT5Module, terminal: FakeTerminal
+    ) -> None:
+        """Measured: a 31-character comment gave ``Invalid "comment" argument`` and, because
+        ``order_send`` then returned ``None``, an "unknown outcome" with no cause."""
+        service = build_demo_service(config, place_orders=True, module=module, log=lambda _l: None)
+
+        report = service.run(max_polls=1, sleep=_no_sleep)
+
+        assert report["orders_placed"] == 1
+        assert report["rejections"] == 0
+        assert len(terminal.sent[0]["comment"]) < 31
+        assert terminal.sent[0]["comment"].split("|")[0], "the identity tag is still first"

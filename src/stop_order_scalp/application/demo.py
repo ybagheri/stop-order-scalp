@@ -124,6 +124,7 @@ class DemoService:
     decisions: int = 0
     orders_placed: int = 0
     rejections: int = 0
+    unknown_outcomes: int = 0
     warnings: list[str] = field(default_factory=list)
     _last_boundary: datetime | None = None
     _stale_reported_for: datetime | None = None
@@ -167,6 +168,17 @@ class DemoService:
                     if errors >= MAX_CONSECUTIVE_ERRORS:
                         reason = "too_many_errors"
                         break
+                if self.unknown_outcomes:
+                    # The terminal could not say whether an order reached the venue. Carrying
+                    # on would be deciding on a book that may not be what this process thinks,
+                    # so stop and let the operator look. The next start re-reads the book.
+                    reason = "execution_unknown"
+                    self.warnings.append(
+                        "an order's outcome is UNKNOWN. Open the terminal's Trade tab and look "
+                        "for a pending order from this run before doing anything else; the next "
+                        "start will re-read the book and settle it."
+                    )
+                    break
                 if self.rejections >= MAX_REJECTIONS:
                     reason = "rejected_repeatedly"
                     break
@@ -261,7 +273,10 @@ class DemoService:
             elif action == "rejected":
                 self.rejections += 1
                 self._event("rejected", "; ".join(step.notes) or "the broker refused the order")
-            elif action in {"gate_refused", "busy", "duplicate", "execution_unknown"}:
+            elif action == "execution_unknown":
+                self.unknown_outcomes += 1
+                self._event(action, "; ".join(step.notes) or why)
+            elif action in {"gate_refused", "busy", "duplicate"}:
                 self._event(action, "; ".join(step.notes) or why)
             elif action == "no_trade":
                 self._event("no_trade", why)
@@ -436,7 +451,10 @@ def build_demo_service(
     shared = module if module is not None else MT5Module()
     feed = MT5Feed(shared)
     broker = MetaTrader5Broker(
-        shared, settings, filling=config.strategy.order.filling_policy
+        shared,
+        settings,
+        filling=config.strategy.order.filling_policy,
+        deviation_points=config.strategy.order.deviation_points,
     )
     try:
         feed.connect(settings)

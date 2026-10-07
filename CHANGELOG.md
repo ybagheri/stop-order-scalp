@@ -74,6 +74,35 @@ project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   `RETURN`, and retcodes 10022, 10025 (no changes: success), 10026, 10027 and 10030 are
   classified.
 
+### Operator tools for a demo account
+
+#### Added
+
+- `book`, `history`, `cancel`, `close`, `flatten`. Until now there was **no way to close a
+  position or cancel an order from the project**: `MetaTrader5Broker` had no `close_position`,
+  `status` read nothing from the account, and a stopped `run` left a position with nobody
+  managing it. Actions are previews unless `--yes`, act only on the strategy's own magic number,
+  and are gated by `DemoOrderGate` / `DemoCloseGate` (separate switches, `LIVE` refused outright).
+- `MetaTrader5Broker.close_position` (market close, filling mode read from the symbol: the real
+  BITCOIN took RETURN for pending orders and FOK only for market ones) and
+  `MetaTrader5Broker.deals` (executed deals, with the reason each ended: stop-loss, take-profit,
+  program or manual).
+- `docs/operations/TRADING_GUIDE.md` and `TRADING_GUIDE.fa.md`: the life of a trade, every
+  command, the outcomes, troubleshooting, and what is still unproven.
+
+#### Fixed
+
+- **`journal` always read the dry-run ledger**, so it showed nothing for a demo run. It now reads
+  the ledger of the configured environment.
+- **A broker rejection crashed the loop** (`BrokerRejectedError` was not caught in
+  `place_order`), leaving the intent unsettled and the state machine stranded mid-validation. It
+  is now settled as `rejected`, and the demo run stops after three.
+- **Order comment length.** The project sent 31 characters because MT5's documentation says it
+  truncates there; the Python package *rejects* it (`Invalid "comment" argument`, `last_error`
+  -2). Found on the first real run, which reported it as `retcode -1 ()` -- an "unknown outcome"
+  with no cause -- because `last_error()` was never read. The limit is 24, requests are validated
+  with `order_check` before sending, and a `None` from `order_send` is explained by `last_error()`.
+
 #### Known, not fixed
 
 - `entry.expiry_candles` is parsed and validated but read by nothing.

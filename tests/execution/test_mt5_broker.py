@@ -49,6 +49,16 @@ class FakeTerminal:
         self.shutdown_calls = 0
         self.sent: list[dict[str, Any]] = []
         self.send_retcode = 0
+        #: ``order_send`` returns nothing, as the real package does for a malformed request.
+        self.send_none = False
+        #: ``SYMBOL_FILLING_*`` flags for market orders: 1 FOK, 2 IOC. The real BITCOIN: 1.
+        self.filling_mode = 1
+        #: What ``order_check`` answers; ``check_none`` mimics a request it cannot evaluate.
+        self.check_retcode = 0
+        self.check_comment = "Done"
+        self.check_none = False
+        self.checked: list[dict[str, Any]] = []
+        self.deal_rows: list[dict[str, Any]] = []
         self.order_rows: list[dict[str, Any]] = []
         self.position_rows: list[dict[str, Any]] = []
         self.last_error_pair: tuple[int, str] = (0, "")
@@ -81,6 +91,7 @@ class FakeTerminal:
             volume_step=Decimal("0.1"),
             trade_stops_level=10,
             trade_freeze_level=0,
+            filling_mode=self.filling_mode,
             currency="USD",
             leverage=100,
         )
@@ -107,8 +118,24 @@ class FakeTerminal:
             trade_allowed=True,
         )
 
+    def history_deals_get(self, date_from: Any, date_to: Any) -> Any:
+        del date_from, date_to
+        return tuple(SimpleNamespace(**r) for r in self.deal_rows)
+
+    def order_check(self, request: dict[str, Any]) -> Any:
+        self.checked.append(dict(request))
+        if len(request.get("comment", "")) >= 31:
+            # Measured on a real terminal: a 31-character comment is refused, not truncated.
+            self.last_error_pair = (-2, 'Invalid "comment" argument')
+            return None
+        if self.check_none:
+            return None
+        return SimpleNamespace(retcode=self.check_retcode, comment=self.check_comment)
+
     def order_send(self, request: dict[str, Any]) -> Any:
         self.sent.append(dict(request))
+        if self.send_none:
+            return None
         if self.send_retcode:
             return SimpleNamespace(
                 retcode=self.send_retcode, order=0, comment="injected failure"
@@ -340,33 +367,38 @@ class TestNoRetry:
 
 
 class TestCommentEncoding:
-    """The identity tag has to survive the terminal's 31-character comment field."""
+    """The identity tag has to survive the terminal's short comment field."""
 
     def test_a_short_comment_round_trips_exactly(self) -> None:
         tag = "0123456789abcdef0123"
-        raw = encode_comment(tag, "M15 buy")
+        raw = encode_comment(tag, "buy")
 
-        assert decode_comment(raw) == (tag, "M15 buy")
+        assert decode_comment(raw) == (tag, "buy")
 
-    def test_only_ten_characters_of_prose_survive_a_twenty_character_tag(self) -> None:
+    def test_only_a_few_characters_of_prose_survive_a_twenty_character_tag(self) -> None:
         """A documented constraint, not an accident.
 
-        The terminal allows 31 characters and the tag is 20 of them, so the human-readable
-        half has about ten characters. Identity is worth more than prose, so the tag wins
-        and the prose is cut -- but the budget is small enough to be worth stating.
+        The real terminal rejects a 31-character comment, so the limit is 24: the tag, the
+        separator and three characters. Identity is worth more than prose, so the tag wins and
+        the prose is cut -- but the budget is small enough to be worth stating.
         """
         raw = encode_comment("0123456789abcdef0123", "buy stop US30")
 
-        assert len(raw) == 31
+        assert len(raw) == 24
         assert decode_comment(raw)[0] == "0123456789abcdef0123"
-        assert decode_comment(raw)[1] == "buy stop U"
+        assert decode_comment(raw)[1] == "buy"
+
+    def test_no_comment_reaches_the_length_the_real_terminal_refused(self) -> None:
+        """The first real order failed on a 31-character comment: ``Invalid "comment"``."""
+        for prose in ("", "SOS/m15_m1", "x" * 200):
+            assert len(encode_comment("0123456789abcdef0123", prose)) < 31
 
     def test_a_long_comment_is_truncated_but_the_tag_survives(self) -> None:
         """Identity must never be the thing that gets cut."""
         tag = "0123456789abcdef0123"
         raw = encode_comment(tag, "x" * 200)
 
-        assert len(raw) <= 31
+        assert len(raw) <= 24
         assert decode_comment(raw)[0] == tag
 
     def test_an_untagged_comment_decodes_to_an_empty_tag(self) -> None:
@@ -535,3 +567,177 @@ class TestClassifyIsExercisedThroughTheBroker:
 
         with pytest.raises(BrokerRejectedError, match="US30"):
             broker.place_order(intent_for(plan))
+
+
+class TestValidationBeforeSending:
+    """``order_check`` asks the server without sending, so a refusal is a plain "no"."""
+
+    def test_the_request_is_checked_before_it_is_sent(
+        self, broker: MetaTrader5Broker, terminal: FakeTerminal, plan: TradePlan
+    ) -> None:
+        broker.place_order(intent_for(plan))
+
+        assert len(terminal.checked) == 1
+        assert terminal.checked[0] == terminal.sent[0], "the checked request is the sent one"
+
+    def test_a_refused_check_sends_nothing_and_says_why(
+        self, broker: MetaTrader5Broker, terminal: FakeTerminal, plan: TradePlan
+    ) -> None:
+        terminal.check_retcode = 10027
+        terminal.check_comment = "AutoTrading disabled by client"
+
+        with pytest.raises(BrokerRejectedError, match="Algo Trading") as caught:
+            broker.place_order(intent_for(plan))
+
+        assert terminal.sent == [], "a refused check must never reach order_send"
+        assert "nothing was sent" in str(caught.value)
+
+    def test_a_check_that_would_be_ambiguous_to_send_is_still_a_clean_no(
+        self, broker: MetaTrader5Broker, terminal: FakeTerminal, plan: TradePlan
+    ) -> None:
+        """A timeout from ``order_send`` is unknown; from ``order_check`` nothing was sent."""
+        terminal.check_retcode = 10012
+
+        with pytest.raises(BrokerRejectedError):
+            broker.place_order(intent_for(plan))
+
+        assert terminal.sent == []
+
+    def test_a_request_the_terminal_cannot_evaluate_reports_its_own_error(
+        self, broker: MetaTrader5Broker, terminal: FakeTerminal, plan: TradePlan
+    ) -> None:
+        terminal.check_none = True
+        terminal.last_error_pair = (-2, 'Invalid "price" argument')
+
+        with pytest.raises(BrokerRejectedError, match="-2") as caught:
+            broker.place_order(intent_for(plan))
+
+        assert "price" in str(caught.value)
+        assert terminal.sent == []
+
+
+class TestAnOrderSendThatReturnsNothing:
+    """``order_send`` returns ``None`` for a malformed request or a dead terminal.
+
+    The first real run met this as ``retcode -1 ()`` -- an "unknown outcome" with no cause,
+    because the reason lives in ``last_error()`` and nobody read it.
+    """
+
+    def test_auto_trading_disabled_is_a_refusal_with_the_fix(
+        self, broker: MetaTrader5Broker, terminal: FakeTerminal, plan: TradePlan
+    ) -> None:
+        terminal.send_none = True
+        terminal.last_error_pair = (-8, "Auto-trading disabled")
+
+        with pytest.raises(BrokerRejectedError, match="Algo Trading"):
+            broker.place_order(intent_for(plan))
+
+        assert len(terminal.sent) == 1
+
+    def test_invalid_arguments_are_a_refusal(
+        self, broker: MetaTrader5Broker, terminal: FakeTerminal, plan: TradePlan
+    ) -> None:
+        terminal.send_none = True
+        terminal.last_error_pair = (-2, "Invalid params")
+
+        with pytest.raises(BrokerRejectedError, match="nothing was sent"):
+            broker.place_order(intent_for(plan))
+
+    def test_an_ipc_failure_stays_unknown_and_names_the_error(
+        self, broker: MetaTrader5Broker, terminal: FakeTerminal, plan: TradePlan
+    ) -> None:
+        terminal.send_none = True
+        terminal.last_error_pair = (-10001, "Internal IPC send failed")
+
+        with pytest.raises(ExecutionUnknownError, match="-10001") as caught:
+            broker.place_order(intent_for(plan))
+
+        assert "Do NOT resend" in str(caught.value)
+        assert len(terminal.sent) == 1
+
+    def test_a_cancel_with_no_answer_is_resolved_by_reading_the_book(
+        self, broker: MetaTrader5Broker, terminal: FakeTerminal
+    ) -> None:
+        terminal.order_rows = []
+        terminal.send_none = True
+        terminal.last_error_pair = (-10001, "Internal IPC send failed")
+
+        assert broker.cancel_order(7001) is True, "the order is not on the book, so it is gone"
+
+
+class TestClosePosition:
+    """Closing at market -- the one operation the broker could not do at all before."""
+
+    @staticmethod
+    def _open(terminal: FakeTerminal, *, long: bool = True) -> None:
+        row = _position_row(42, sl=39990.0, tp=40100.0)
+        row["type"] = 0 if long else 1
+        terminal.position_rows = [row]
+
+    def test_a_long_is_closed_by_selling_at_the_bid(
+        self, broker: MetaTrader5Broker, terminal: FakeTerminal
+    ) -> None:
+        self._open(terminal, long=True)
+
+        assert broker.close_position(42) is True
+
+        request = terminal.sent[0]
+        assert request["action"] == 1, "TRADE_ACTION_DEAL"
+        assert request["type"] == 1, "ORDER_TYPE_SELL closes a long"
+        assert request["position"] == 42
+        assert request["price"] == pytest.approx(39999.0), "the bid"
+        assert request["volume"] == pytest.approx(0.4)
+
+    def test_a_short_is_closed_by_buying_at_the_ask(
+        self, broker: MetaTrader5Broker, terminal: FakeTerminal
+    ) -> None:
+        self._open(terminal, long=False)
+
+        broker.close_position(42)
+
+        assert terminal.sent[0]["type"] == 0, "ORDER_TYPE_BUY closes a short"
+        assert terminal.sent[0]["price"] == pytest.approx(39999.5), "the ask"
+
+    @pytest.mark.parametrize(("flags", "expected"), [(1, 0), (2, 1), (3, 0), (0, 2)])
+    def test_the_filling_mode_is_one_the_symbol_allows_for_market_orders(
+        self, broker: MetaTrader5Broker, terminal: FakeTerminal, flags: int, expected: int
+    ) -> None:
+        """The real BITCOIN took RETURN for pending orders and only FOK for market ones."""
+        self._open(terminal)
+        terminal.filling_mode = flags
+
+        broker.close_position(42)
+
+        assert terminal.sent[0]["type_filling"] == expected
+
+    def test_a_position_that_is_not_open_is_refused_without_sending(
+        self, broker: MetaTrader5Broker, terminal: FakeTerminal
+    ) -> None:
+        with pytest.raises(BrokerRejectedError, match="no open position"):
+            broker.close_position(42)
+
+        assert terminal.sent == []
+
+    def test_a_refused_check_sends_nothing(
+        self, broker: MetaTrader5Broker, terminal: FakeTerminal
+    ) -> None:
+        self._open(terminal)
+        terminal.check_retcode = 10018
+        terminal.check_comment = "Market closed"
+
+        with pytest.raises(BrokerRejectedError, match="closed"):
+            broker.close_position(42)
+
+        assert terminal.sent == []
+
+    def test_no_answer_is_unknown_and_is_not_resent(
+        self, broker: MetaTrader5Broker, terminal: FakeTerminal
+    ) -> None:
+        self._open(terminal)
+        terminal.send_none = True
+        terminal.last_error_pair = (-10001, "Internal IPC send failed")
+
+        with pytest.raises(ExecutionUnknownError):
+            broker.close_position(42)
+
+        assert len(terminal.sent) == 1

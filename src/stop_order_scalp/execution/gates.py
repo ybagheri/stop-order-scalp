@@ -37,6 +37,7 @@ from stop_order_scalp.domain.models import EnvironmentSettings
 
 __all__ = [
     "CloseGate",
+    "DemoCloseGate",
     "DemoOrderGate",
     "Gate",
     "GateDecision",
@@ -275,6 +276,55 @@ class DemoOrderGate:
     def __str__(self) -> str:
         return (
             f"DemoOrderGate(enabled={self.enabled}, "
+            f"account_confirmed_demo={self.account_confirmed_demo})"
+        )
+
+
+@dataclass(frozen=True, slots=True)
+class DemoCloseGate:
+    """Opt-in for closing positions on a **demo** account, and only a demo account.
+
+    The same four conditions as :class:`DemoOrderGate`, with ``SOS_ALLOW_CLOSE`` in place of
+    ``SOS_ALLOW_ORDER``: placing and closing are different risks and have separate switches, so
+    an operator who is happy to let the strategy open trades has not thereby agreed to let a
+    command close them.
+    """
+
+    enabled: bool = False
+    account_confirmed_demo: bool = False
+
+    @property
+    def simulated(self) -> bool:
+        return False
+
+    def check(self, settings: EnvironmentSettings) -> GateDecision:
+        if not self.enabled:
+            return refusal(GateRefusal.DISABLED, "demo close gate is closed; pass --yes to act")
+        if settings.environment is not Environment.DEMO:
+            return refusal(
+                GateRefusal.DEMO_REQUIRED,
+                f"environment is {settings.environment}; this gate opens for DEMO only and "
+                "refuses LIVE outright",
+            )
+        if not settings.allow_close:
+            return refusal(
+                GateRefusal.ALLOW_OPERATION_MISSING,
+                "SOS_ALLOW_CLOSE is false; closing positions requires its own opt-in",
+            )
+        if not self.account_confirmed_demo:
+            return refusal(
+                GateRefusal.DEMO_REQUIRED,
+                "the terminal did not confirm this is a demo account; refusing to close "
+                "positions on an account that might be real",
+            )
+        return OPEN
+
+    def require(self, settings: EnvironmentSettings) -> None:
+        self.check(settings).require()
+
+    def __str__(self) -> str:
+        return (
+            f"DemoCloseGate(enabled={self.enabled}, "
             f"account_confirmed_demo={self.account_confirmed_demo})"
         )
 

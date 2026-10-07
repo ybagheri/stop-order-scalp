@@ -8,6 +8,32 @@
 
 ---
 
+## Update: first contact with a real terminal (read this first)
+
+The statement further down that "nothing has ever placed an order through this project" is no
+longer true: a pending stop order has been *attempted* against an Alpari demo terminal. What that
+taught is recorded here because every item was invisible to the test suite.
+
+- **Test doubles agreed with the code, not with the package.** `MT5Api` declared `order_get` and
+  `time_current`, neither of which exists in the `MetaTrader5` package; `TRADE_ACTION_PENDING`
+  was `1` (it is `5`); `modify_position` sent `tp=0`, which *removes* the target. All passed.
+  `tests/unit/test_mt5_surface.py` now fails if the code calls a function the package lacks, and
+  the doubles expose only real functions.
+- **The order gate was bypassable.** It ran only when a caller passed `settings`, and the normal
+  path passed none. The lifecycle now holds its environment and fails closed.
+- **The comment limit is below 31**, measured: a 31-character comment gave `Invalid "comment"
+  argument`. `scripts/diagnose_order.py --comment-scan` measures the real ceiling; the project
+  uses 24 until that is known.
+- **`order_send` returning `None` is not "unknown".** The cause is in `last_error()`. Requests are
+  now checked with `order_check` first, which sends nothing.
+- Market and pending orders take **different filling modes** on the same symbol (BITCOIN: RETURN
+  for pending, FOK only for market).
+
+**Still unobserved on a real terminal:** a fill, break-even, trailing, a close, and ledger
+recovery after a real interruption. `docs/operations/TRADING_GUIDE.md` lists what an operator
+does and what is unproven. Do not mark Phase 11 done until a full open-manage-close cycle has been
+watched in the terminal.
+
 ## Current Phase
 
 **Phase 11 — Demo Validation — in progress. The specification is measured; the account is

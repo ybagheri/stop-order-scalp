@@ -135,6 +135,12 @@ class TestParser:
             "journal",
             "diagnostics",
             "backtest",
+            # The operator commands for a demo account.
+            "book",
+            "history",
+            "cancel",
+            "close",
+            "flatten",
         }
 
     def test_a_missing_command_is_rejected(self) -> None:
@@ -305,3 +311,19 @@ class TestErrorReporting:
         # Declared here so a future refactor cannot silently renumber it.
         assert EXIT_NOT_CONNECTED == 3
         assert EXIT_UNAVAILABLE == 4
+
+
+class TestJournalReadsTheConfiguredEnvironment:
+    def test_a_demo_run_reads_the_demo_ledger_not_the_dry_run_one(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    ) -> None:
+        """It used to be hard-wired to DRY_RUN, so a demo run's journal always read empty."""
+        monkeypatch.setenv("SOS_ENVIRONMENT", "DEMO")
+        out, err = io.StringIO(), io.StringIO()
+
+        code = main(["journal"], stdout=out, stderr=err)
+
+        report = json.loads(out.getvalue())
+        assert code == EXIT_OK
+        assert report["ledger"].endswith("state-demo.json")
+        assert report["environment"].endswith("DEMO")
